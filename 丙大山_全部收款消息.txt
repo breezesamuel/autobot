@@ -1,0 +1,126 @@
+# 💰 丙大山 — 全部收款消息（复制即用）
+**来源：/opt/bingdashan/data/billing/manual_8_outreach.md**
+**生成时间：2026-11-17 14:19 北京时间**
+
+---
+
+## 🔥 大额年度订阅（¥500 each）— 先发这两条！
+
+### 订单 mvgevdw6xm1av · ref: mvgeerdl · 访客 ip:101_228_2_131
+```
+客户您好，您 10 月意向的【专业·年度 366天】我们为您保留名额。这是您的专属开通链接，点它付款即开通 + 赠 30 天优先支持：https://tools-cn.highkingflower.com/api/pay?plan=proY&slug=tool&ref=mvgeerdl （大额支持分期/对公，可回我协助。限时 48h，本季最低价 ¥500，历史回测不代表未来收益，付款前请确认需求。）
+```
+
+### 订单 mvi21kh7wvntq · ref: ao7n · 访客 ip:223_104_5_60
+```
+客户您好，您 10 月意向的【专业·年度 366天】我们为您保留名额。这是您的专属开通链接，点它付款即开通 + 赠 30 天优先支持：https://tools-cn.highkingflower.com/api/pay?plan=proY&slug=tool&ref=ao7n （大额支持分期/对公，可回我协助。限时 48h，本季最低价 ¥500，历史回测不代表未来收益，付款前请确认需求。）
+```
+
+---
+
+## 🟡 团队年度（¥299）
+
+### 订单 mvi221uqrxqob · ref: ao7n · 访客 ip:223_104_5_60
+```
+客户您好，您 10 月意向的【团队·年度 366天】我们为您保留名额。这是您的专属开通链接，点它付款即开通 + 赠 30 天优先支持：https://tools-cn.highkingflower.com/api/pay?plan=team&slug=tool&ref=ao7n （大额支持分期/对公，可回我协助。限时 48h，本季最低价 ¥299，历史回测不代表未来收益，付款前请确认需求。）
+```
+
+---
+
+## 🟠 季度订阅（¥150）
+
+### 订单 mvp9kl8kl6uag · ref: aob0 · 访客 ip:125_85_176_118
+```
+您好，您选的【专业·季度 93天】还差最后一步。专属链接在此，付款即开通：https://tools-cn.highkingflower.com/api/pay?plan=pro3&slug=tool&ref=aob0  （限时 48h，附赠 1 份专业回测报告(C3)。¥150，非投资建议，历史回测不代表未来收益。）
+```
+
+---
+
+## 🟢 月度订阅（¥60 each）
+
+### 订单 mvut742rctwkh · ref: aodm · 访客 ip:101_228_130_101
+```
+您好，您选的【专业·月度 31天】还差最后一步。专属链接在此，付款即开通：https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=aodm  （限时 48h，附赠 1 份专业回测报告(C3)。¥60，非投资建议，历史回测不代表未来收益。）
+```
+
+### 订单 mvgetaxc4pezq · ref: mvgeerdl · 访客 ip:101_228_2_131
+```
+您好，您选的【专业·月度 31天】还差最后一步。专属链接在此，付款即开通：https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=mvgeerdl  （限时 48h，附赠 1 份专业回测报告(C3)。¥60，非投资建议，历史回测不代表未来收益。）
+```
+
+---
+
+## 🔵 试用待支付（¥1 each）
+
+### 订单 mvut5w4ezvp9n · ref: aodm · 访客 ip:101_228_130_101
+```
+您好，您的 7 天体验单待支付，专属链接：https://tools-cn.highkingflower.com/api/pay?plan=trial&slug=tool&ref=aodm（¥1，7 天解锁全部工具。非投资建议。）
+```
+
+### 订单 mvz2eultgsbh4 · ref: aofl · 访客 ip:39_103_144_80
+```
+您好，您的 7 天体验单待支付，专属链接：https://tools-cn.highkingflower.com/api/pay?plan=trial&slug=tool&ref=aofl（¥1，7 天解锁全部工具。非投资建议。）
+```
+
+---
+
+## ⚡ 试用到期用户升级（¥60 each）— 5条
+
+| ref | 距今天数 | 链接 |
+|-----|---------|------|
+| mvaw0kq8 | 28.6天 | https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=mvaw0kq8 |
+| mvg36qs9 | 25.0天 | https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=mvg36qs9 |
+| ao8u | 21.9天 | https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=ao8u |
+| aodm | 14.7天 | https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=aodm |
+| aofl | 11.7天 | https://tools-cn.highkingflower.com/api/pay?plan=pro&slug=tool&ref=aofl |
+
+话术：
+```
+您的 7 天体验(X天前)已结束。解锁全部工具 + 专业回测报告(C3) + 行情数据订阅，专业月度 ¥60/31天，限时新用户 9 折。专属升级链接：{link}
+```
+
+---
+
+## 💰 今日回收目标汇总
+
+| 类型 | 数量 | 单价 | 小计 |
+|------|------|------|------|
+| proY年度 | 2 | ¥500 | **¥1,000** |
+| team年度 | 1 | ¥299 | **¥299** |
+| pro3季度 | 1 | ¥150 | **¥150** |
+| pro月度 | 2 | ¥60 | **¥120** |
+| trial待付 | 2 | ¥1 | **¥2** |
+| 试用到期升级 | 5 | ¥60 | **¥300** |
+| **合计** | **13条** | — | **¥1,871** |
+
+另加 **¥899 × 2 = ¥1,798**（年费对公打款邀请）
+
+🎯 **今日总回收潜力：¥3,669**
+
+---
+
+## 📋 发送优先级建议
+
+**第1轮（最高价值）：**
+1. mvgevdw6xm1av (¥500 + ¥899对公)
+2. mvi21kh7wvntq (¥500 + ¥899对公)
+3. mvi221uqrxqob (¥299)
+
+**第2轮：**
+4. mvp9kl8kl6uag (¥150)
+5. mvut742rctwkh (¥60) + mvgetaxc4pezq (¥60)
+
+**第3轮：**
+6-13. trial转化 + 试用到期升级 (¥1×2 + ¥60×5)
+
+---
+
+## ⚠️ 使用提醒
+- 发前先确认 ref(vid) 对应的客户（找当初登记这 8 单的人，或按访客 IP 回访）
+- 客户付款后，订单自动变 paid + 订阅激活，无需 manual 标记
+- 合规：所有话术已含"非投资建议/历史回测不代表未来"，大额走对公/分期不夸大收益
+
+---
+
+*数据来源：/opt/bingdashan/data/billing/manual_8_outreach.md*
+*生成时间：2026-11-17 14:19 UTC+8*

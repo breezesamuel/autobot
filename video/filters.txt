@@ -1,0 +1,9 @@
+[0:v]gradient=x=0:y=0:a=0.4:b=#0f2744:c=#1a3a5c:d=#0a1628[vbg];
+[vbg]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='当智能，连接物理与数字世界':fontsize=58:fontcolor=white:x=(w-text_w)/2:y=h/2-100:enable='between(t,0,5)'[t1];
+[t1]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='从算法模型到嵌入式硬件':fontsize=44:fontcolor=#88ccff:x=(w-text_w)/2:y=h/2-30:enable='between(t,5,13)'[t2];
+[t2]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='交付能落地的智能化系统':fontsize=44:fontcolor=#88ccff:x=(w-text_w)/2:y=h/2+30:enable='between(t,5,13)'[t3];
+[t3]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='感知 · 决策 · 执行':fontsize=50:fontcolor=white:x=(w-text_w)/2:y=h/2-50:enable='between(t,13,21)'[t4];
+[t4]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='全栈技术服务 软硬一体':fontsize=42:fontcolor=#aaddff:x=(w-text_w)/2:y=h/2+30:enable='between(t,13,21)'[t5];
+[t5]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='让复杂场景，变简单可靠':fontsize=56:fontcolor=white:x=(w-text_w)/2:y=h/2:enable='between(t,21,26)'[t6];
+[t6]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='有兴趣，联系廖先生':fontsize=48:fontcolor=#ffcc00:x=(w-text_w)/2:y=h/2-60:enable='between(t,26,30)'[t7];
+[t7]drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':text='TEL: 15802178278':fontsize=40:fontcolor=#ffaa00:x=(w-text_w)/2:y=h/2+50:enable='between(t,26,30)'

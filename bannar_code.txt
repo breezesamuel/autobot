@@ -1,0 +1,4 @@
+<div style="background:linear-gradient(90deg,#ff6b6b,#ffd93d);color:white;padding:15px;text-align:center;font-size:18px;border-radius:8px;margin:10px;">
+  🎉 <strong>限时优惠：</strong>年付¥899立省¥289！已有<strong>150位用户</strong>选择我们<br>
+  <a href="/api/pay?plan=y" style="color:white;font-weight:bold;font-size:20px;text-decoration:underline;">立即查看 →</a>
+</div>

@@ -1,0 +1,19 @@
+[Script]
+Title: Intelligent System Promo 30s
+Style: Deep Blue Tech Style
+Font: Microsoft YaHei
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Microsoft YaHei,48,&H00FFFFFF,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,20,20,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,当智能，连接物理与数字世界
+Dialogue: 0,0:00:05.00,0:00:13.00,Default,,0,0,0,,从算法模型到嵌入式硬件
+Dialogue: 0,0:00:06.00,0:00:13.00,Default,,0,0,0,,交付能落地的智能化系统
+Dialogue: 0,0:00:13.00,0:00:21.00,Default,,0,0,0,,感知 · 决策 · 执行
+Dialogue: 0,0:00:13.00,0:00:21.00,Default,,0,0,0,,全栈技术服务 软硬一体
+Dialogue: 0,0:00:21.00,0:00:26.00,Default,,0,0,0,,让复杂场景，变简单可靠
+Dialogue: 0,0:00:26.00,0:00:30.00,Default,,0,0,0,,有兴趣？联系我们
+Dialogue: 0,0:00:27.00,0:00:30.00,Default,,0,0,0,,廖先生 TEL: 15802178278

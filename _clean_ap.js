@@ -1,0 +1,1750 @@
+﻿const crypto=require('crypto');
+const billing=require('../lib/arcade_billing.js');
+const stripeMod=require('../lib/stripe.js');
+function ts(){const d=new Date(Date.now()+8*3600*1000);const p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());}
+function get(k){return process.env[k]||'';}
+// 密钥支持"文件"形式：ALIPAY_MERCHANT_PRIVATE_KEY_FILE / ALIPAY_ALIPAY_PUBLIC_KEY_FILE
+// 为什么需要: systemd 的 EnvironmentFile **不会**把 \n 解成真换行
+// （实测值里换行变成字面量 n）→ 多行 PEM 直接放进 env 会被毁掉。
+// 自托管实例把 PEM 放文件里更安全（不进 env、不进进程命令行）。
+const FILEKEY_CACHE={};
+function getKey(name){
+  if(FILEKEY_CACHE[name]!==undefined)return FILEKEY_CACHE[name];
+  let v='';
+  try{
+    const f=process.env[name+'_FILE'];
+    if(f&&require('node:fs').existsSync(f))v=require('node:fs').readFileSync(f,'utf8');
+  }catch(e){}
+  if(!v)v=get(name);
+  FILEKEY_CACHE[name]=v;
+  return v;
+}
+
+const PLANS={
+  trial:  {cny:1,   usd:1,   days:7,   label:'首周体验(7天)'},
+  pro:    {cny:60,  usd:9.9, days:31,  label:'专业·月度'},
+  pro3:   {cny:150, usd:25,  days:93,  label:'专业·季度'},
+  proY:   {cny:500, usd:99,  days:366, label:'专业·年度'},
+  team:   {cny:299, usd:41.5,days:366, label:'团队·年度'},
+  // 兼容旧 arcade 充值包
+  m10:10,m30:30,m100:100,y99:99,y299:299,y999:999,t30:6,t60:12,t300:60,t1000:200
+};
+const MINPACK={t30:30,t60:60,t300:300,t1000:1000};
+// 推荐返现阶梯: 封顶 30%。
+// 原 [[1,10],[2,30],[3,50],[5,70],[10,100]] → 邀请 10 人=100% 免单，平台实收 ¥0、推荐人佣金也 ¥0（双输）。
+// 无外部流量时自推荐=纯亏损，故把封顶压到 30%（净收入 = 标价×70%×70% ≈ 49%）。
+const LADDER=[[1,10],[2,20],[3,30]];
+// 每个游戏免费时长（秒）。默认 600 秒 = 10 分钟。与游戏端 FREE_SEC=600 契约一致。
+// 2026-10-11 修复：此前该常量缺失，导致 /api/arcade 首次请求抛 ReferenceError 500，
+// 免费时长永不入账、付费扣费全线失效（心跳计费形同虚设）。
+const FREE_SEC=parseInt(process.env.ARCADE_FREE_SEC||'600',10);
+const WALLETS={
+  base_primary:{chain:'Base',asset:'USDC',address:'0xa75Cc8545B169F0BeF2f29c9CCF86bc686D039E8',role:'主收款(平台)'},
+  evm_payout:{chain:'EVM',asset:'USDC/ETH/USDT',address:'0x52513A733D4b52282F2b4f5A91D965D38b64f3BB',role:'Direct EVM Payout'},
+  payout_usdc:{chain:'Base',asset:'USDC',address:'0x2C5dF5f91642B1214c28E51C67aEf1c61CbE1824',role:'Payout(USDC on Base)'},
+  payment_usdc:{chain:'Base',asset:'USDC',address:'0x047b2A7fc72862a0e3E772eb53b19d35929BEd46',role:'Payment(USDC on Base)'},
+  evm_alipay:{chain:'EVM',asset:'USDC/ETH',address:'0xDe37cDc93fC425e14EBdB827086E2144b31E855a',role:'EVM 收款'},
+  cn_wallet:{chain:'EVM',asset:'多币',address:'0x5D36F4c480F900F0E7Ad0DC4fA0402554b972bF8',role:'国内收款到钱包'},
+  solana_bounty:{chain:'Solana',asset:'SOL/usdc',address:'4moYJshT1bW71iESvwJHMynA5NFV534PJzFiKraydV6Z',role:'bounty 收款'},
+  // owner 指定 (2026-11-11): 币结算收款钱包 = Coinbase 自托管 (EVM, 40-hex 合法)
+  // 仅用于用户自己挣的币 (写作/返现/劳动/带宽渠道结算) -> 打款到此钱包
+  // 合规红线: 绝不接扫全网无主资金/airdrop 据为己有 -> 抽佣收进此钱包
+  owner_coinbase:{chain:'EVM',asset:'USDC/ETH/USDT',address:'0xe35b920Ba38bc83fb19D0b77871545C2F986093c',role:'owner coinbase 收款(币结算)',enabled:true},
+  // owner 指定 (2026-11-12): Base 体系 收款/归集钱包 (USDC on Base, eip155:8453)
+  // USDC 合约 = 0x833589fCD2e695B55A1C68A696f0810f2C3AD36C (Base 官方)
+  // 注意: owner 曾给的 0x8335...bdA02913 是错的多位(33位), 不用
+  base_receive:{chain:'Base',asset:'USDC',address:'0x74a9f91763c28571af7a52987f425f62825cf5d8',role:'owner 收款钱包(Base USDC)',enabled:true},
+  agentpay_treasury:{chain:'Base',asset:'USDC',address:'0x367F1b3D8Ca90D1e087481a9A40d585Bf3451a03',role:'AgentPay treasury(Base USDC)',enabled:true},
+  base_usdc_contract:{chain:'Base',asset:'USDC',address:'0x833589fCD2e695B55A1C68A696f0810f2C3AD36C',role:'USDC 合约(Base)',is_contract:true}
+};
+function ladderPct(n){let pct=0;for(let i=0;i<LADDER.length;i++){if(n>=LADDER[i][0])pct=LADDER[i][1];}return Math.max(0,Math.min(100,pct));}
+
+function baseFrom(req){
+  const env=get('SITE_BASE');if(env)return env.replace(/\/$/,'');
+  const h=(req&&req.headers)||{};
+  const host=h['x-forwarded-host']||h.host||'bingdashan-pain-tools.vercel.app';
+  const proto=h['x-forwarded-proto']||'https';
+  return proto+'://'+String(host).split(',')[0].trim();
+}
+function sigKey(raw){
+  raw=String(raw||'').trim();
+  if(!raw)throw new Error('私钥为空');
+  // ① PEM 文本：直接用。⚠️ 旧实现把 PEM 去掉头尾后**又 base64 编码一次**，
+  //    生成的是双重编码的垃圾 → "DECODER routines::unsupported"。
+  //    另外 \n 可能被 systemd/env 压成字面量 "\n"，一并还原。
+  if(raw.indexOf('-----BEGIN')>=0){
+    const pem=raw.replace(/\\n/g,'\n').replace(/\r\n/g,'\n');
+    try{return crypto.createPrivateKey(pem);}catch(e){}
+  }
+  // ② base64(DER) —— 线上 Vercel 用的就是这种形式（必须保持可用）
+  const b=Buffer.from(raw.replace(/\s/g,''),'base64');
+  if(Buffer.isBuffer(b)){try{return crypto.createPrivateKey({key:b,format:'der',type:'pkcs8'});}catch(e){}}
+  // ③ base64(PEM 文本)
+  try{return crypto.createPrivateKey(b.toString('utf8'));}catch(e){}
+  throw new Error('私钥格式无法识别（需要 PEM 或 base64(DER)）');
+}
+function verKey(raw){
+  raw=String(raw||'').trim();
+  // ① PEM 文本（与 sigKey 同理：旧实现对 PEM 也是双重编码 → 坏）
+  if(raw.indexOf('-----BEGIN')>=0){
+    const pem=raw.replace(/\\n/g,'\n').replace(/\r\n/g,'\n');
+    try{return crypto.createPublicKey(pem);}catch(e){}
+  }
+  // ② base64(DER)
+  const b=Buffer.from(raw.replace(/\s/g,''),'base64');
+  if(Buffer.isBuffer(b)){try{return crypto.createPublicKey({key:b,format:'der',type:'spki'});}catch(e){}}
+  // ③ base64(PEM 文本)
+  try{return crypto.createPublicKey(b.toString('utf8'));}catch(e){}
+  throw new Error('公钥格式无法识别（需要 PEM 或 base64(DER)）');
+}
+function signParams(params,priv){
+  const signStr=Object.keys(params).sort().filter(k=>params[k]!==''&&params[k]!==undefined&&params[k]!==null).map(k=>k+'='+params[k]).join('&');
+  return crypto.createSign('RSA-SHA256').update(signStr,'utf8').sign(sigKey(priv),'base64');
+}
+function aesConf(){
+  const k=get('ALIPAY_AES_KEY');
+  if(!k)return null;
+  let b;
+  try{b=Buffer.from(k,'base64');}catch(e){b=null;}
+  if(!b||(b.length!==16&&b.length!==24&&b.length!==32))return null;
+  return {key:b,iv:Buffer.alloc(b.length>=16?16:b.length)};
+}
+function aesEncrypt(plain){
+  const c=aesConf();if(!c)return plain;
+  const cph=crypto.createCipheriv('aes-'+(c.key.length*8)+'-cbc',c.key,c.iv);
+  return cph.update(String(plain),'utf8','base64')+cph.final('base64');
+}
+function aesDecrypt(ct){
+  const c=aesConf();if(!c)return null;
+  try{
+    const dcp=crypto.createDecipheriv('aes-'+(c.key.length*8)+'-cbc',c.key,c.iv);
+    return dcp.update(String(ct),'base64','utf8')+dcp.final('utf8');
+  }catch(e){return null;}
+}
+function alipayParams(biz,method,base,extra){
+  const APP=get('ALIPAY_APP_ID'),PRIV=getKey('ALIPAY_MERCHANT_PRIVATE_KEY');
+  if(!APP||!PRIV)return{error:'服务端缺少 ALIPAY_APP_ID 或 ALIPAY_MERCHANT_PRIVATE_KEY(请在 Vercel 环境变量配置)'};
+  const plainBiz=JSON.stringify(biz);
+  const encrypted=aesEncrypt(plainBiz);
+  const params=Object.assign({app_id:APP,method:method,charset:'utf-8',sign_type:'RSA2',timestamp:ts(),version:'1.0',notify_url:base+'/api/notify',return_url:base+'/paid.html',format:'JSON',biz_content:encrypted},extra||{});
+  if(encrypted!==plainBiz)params.encrypt_type='AES';
+  params.sign=signParams(params,PRIV);return{params:params};
+}
+function verifyNotify(form){
+  const PUB=getKey('ALIPAY_ALIPAY_PUBLIC_KEY');if(!PUB)return{ok:false,error:'缺少支付宝公钥'};
+  const clean={};Object.keys(form).forEach(k=>{if(form[k]!==undefined&&form[k]!==null&&form[k]!==''&&k!=='sign'&&k!=='sign_type')clean[k]=form[k];});
+  const signStr=Object.keys(clean).sort().map(k=>k+'='+clean[k]).join('&');
+  let ok=false;try{ok=crypto.createVerify('RSA-SHA256').update(signStr,'utf8').verify(verKey(PUB),String(form.sign||''),'base64');}catch(e){ok=false;}
+  let eff=Object.assign({},form);
+  if(ok&&form.encrypt_type==='AES'&&String(form.biz_content||'').length>0){
+    const dec=aesDecrypt(form.biz_content);
+    if(dec){try{const j=JSON.parse(dec);Object.assign(eff,Object.fromEntries(Object.entries(j).filter(([k,v])=>eff[k]===undefined&&v!==undefined)));}catch(e){}}
+  }
+  const paid=ok&&eff.app_id===get('ALIPAY_APP_ID')&&(eff.trade_status==='TRADE_SUCCESS'||eff.trade_status==='TRADE_FINISHED')&&!!eff.out_trade_no;
+  // 关键: 返回 passback_params (下单时传入的 slug/plan/ref/inv), 用于"订单记录丢失时重建", 避免"收钱不认账"
+  let passback={};
+  try{
+    const pp=eff.passback_params||form.passback_params;
+    if(pp){
+      const decoded=decodeURIComponent(String(pp));
+      try{ passback=JSON.parse(decoded); }catch(e2){ passback={raw:decoded}; }
+    }
+  }catch(e){}
+  return {ok:ok&&paid,verified:ok,paid:paid,out_trade_no:eff.out_trade_no,trade_status:eff.trade_status,trade_no:eff.trade_no,buyer:eff.buyer_logon_id||eff.buyer_id,total:eff.total_amount||eff.amount,subject:eff.subject,decrypted:eff.biz_content!==form.biz_content,passback:passback};
+}
+
+function privFingerprint(){
+  const PRIV=getKey('ALIPAY_MERCHANT_PRIVATE_KEY');
+  if(!PRIV)return null;
+  try{
+    const jwk=crypto.createPublicKey(sigKey(PRIV)).export({format:'jwk'});
+    const jn=String(jwk.n||'');
+    const b=Buffer.from(jn.replace(/-/g,'+').replace(/_/g,'/'),'base64');
+    return b.toString('hex').slice(0,32);
+  }catch(e){return 'ERR:'+e.message;}
+}
+
+// ========== WeChat Pay V3 ==========
+function wxpaySign(method, url, timestamp, nonce, body, privateKey) {
+  const msg = `${method}\n${url}\n${timestamp}\n${nonce}\n${body}\n`;
+  return crypto.createSign('RSA-SHA256').update(msg).sign(privateKey, 'base64');
+}
+function wxpayVerify(headers, body, publicKey) {
+  const timestamp = headers['wechatpay-timestamp'];
+  const nonce = headers['wechatpay-nonce'];
+  const signature = headers['wechatpay-signature'];
+  const serial = headers['wechatpay-serial'];
+  const msg = `${timestamp}\n${nonce}\n${body}\n`;
+  const ver = crypto.createVerify('RSA-SHA256').update(msg);
+  return ver.verify(publicKey, Buffer.from(signature, 'base64'));
+}
+async function wxpayCreateOrder(base, plan, ref, slug, inv, outTradeNo) {
+  let sp = PLANS[plan];
+  // 工具页数字套餐（m10/m30/…）与订阅对象套餐（trial/pro…）统一支持
+  if (typeof sp === 'number') sp = { cny: sp };
+  if (!sp) return {error:'unknown_plan'};
+  const mchid = get('WECHAT_MCHID');
+  const appid = get('WECHAT_APPID');
+  const certSerial = get('WECHAT_CERT_SERIAL');
+  const apiv3Key = get('WECHAT_APIV3_KEY');
+  const notifyUrl = base + '/api/wxpay/notify';
+  if (!mchid || !appid || !certSerial || !apiv3Key) {
+    return {error:'wechat_pay_not_configured', missing: {
+      mchid: !!mchid, appid: !!appid,
+      certSerial: !!certSerial, apiv3Key: !!apiv3Key } };
+  }
+  // WECHAT_PRIVATE_KEY 存的是 base64(PEM)（Vercel Secret 限制，不可直接存 PEM）
+  // 解 base64 → 得到 PEM 文本，再传给 crypto
+  const b64raw = get('WECHAT_PRIVATE_KEY') || '';
+  let privateKey;
+  try {
+    const pemText = Buffer.from(b64raw, 'base64').toString('utf8');
+    privateKey = crypto.createPrivateKey({ key: pemText, format: 'pem' });
+  } catch (e) {
+    return {error:'wechat_private_key_decode_failed', detail: e.message};
+  }
+  const url = 'https://api.mch.weixin.qq.com/v3/pay/transactions/native';
+  const timestamp = Math.floor(Date.now()/1000);
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const body = JSON.stringify({
+    appid, mchid, description: `bingdashan ${plan}`, out_trade_no: outTradeNo,
+    notify_url: notifyUrl,
+    amount: {total: Math.round(sp.cny * 100), currency: 'CNY'},
+  });
+  const signature = wxpaySign('POST', '/v3/pay/transactions/native', timestamp, nonce, body, privateKey);
+  const auth = `WECHATPAY2-SHA256-RSA2048 mchid="${mchid}",nonce_str="${nonce}",timestamp="${timestamp}",serial_no="${certSerial}",signature="${signature}"`;
+  try {
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json','Authorization':auth,'Accept':'application/json','User-Agent':'bingdashan/1.0'}, body, signal:AbortSignal.timeout(15000)});
+    const j = await r.json();
+    if (r.ok && j.code_url) {
+      return {ok:true, code_url: j.code_url, out_trade_no: outTradeNo};
+    }
+    return {error:j.message||'wxpay_failed', detail:j};
+  } catch(e) { return {error:e.message}; }
+}
+// 微信侧查单（Native 支付状态轮询）：GET /v3/pay/transactions/out-trade-no/{no}?mchid=
+async function wxpayQueryOrder(outTradeNo) {
+  const mchid = get('WECHAT_MCHID');
+  const certSerial = get('WECHAT_CERT_SERIAL');
+  const b64raw = get('WECHAT_PRIVATE_KEY') || '';
+  let privateKey;
+  try { privateKey = crypto.createPrivateKey({ key: Buffer.from(b64raw, 'base64').toString('utf8'), format: 'pem' }); }
+  catch (e) { return {error:'wechat_private_key_decode_failed', detail:e.message}; }
+  const path = '/v3/pay/transactions/out-trade-no/' + encodeURIComponent(outTradeNo) + '?mchid=' + encodeURIComponent(mchid);
+  const timestamp = Math.floor(Date.now()/1000);
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const msg = `GET\n${path}\n${timestamp}\n${nonce}\n\n`;
+  const signature = crypto.createSign('RSA-SHA256').update(msg).sign(privateKey, 'base64');
+  const auth = `WECHATPAY2-SHA256-RSA2048 mchid="${mchid}",nonce_str="${nonce}",timestamp="${timestamp}",serial_no="${certSerial}",signature="${signature}"`;
+  try {
+    const r = await fetch('https://api.mch.weixin.qq.com' + path, {headers:{Authorization:auth,'Accept':'application/json','User-Agent':'bingdashan/1.0'}, signal:AbortSignal.timeout(15000)});
+    const j = await r.json();
+    return { ok: r.ok, trade_state: j.trade_state, paid: j.trade_state === 'SUCCESS', amount: (j.amount && j.amount.total) ? (j.amount.total/100).toFixed(2) : null, detail: j };
+  } catch(e) { return {error:e.message}; }
+}
+async function wxpayHandleNotify(rawBody, headers) {
+  const publicKeyPem = get('WECHAT_PUBLIC_KEY');
+  if (!publicKeyPem) return {ok:false, error:'wxpay_public_key_missing'};
+  let publicKey;
+  try { publicKey = crypto.createPublicKey({key: publicKeyPem, format: 'pem'}); }
+  catch(e) { return {ok:false, error:'wxpay_public_key_invalid'}; } // 密钥 PEM 格式坏 -> fail-closed 400 (旧版直接 throw -> 500)
+  if (!wxpayVerify(headers, rawBody, publicKey)) return {ok:false, error:'signature_invalid'};
+  let j;
+  try { j = JSON.parse(rawBody); } catch(e) { return {ok:false, error:'invalid_json'}; }
+  const resource = j.resource;
+  if (!resource) return {ok:false, error:'no_resource'};
+  // 解密 AES-GCM
+  const key = Buffer.from(get('WECHAT_APIV3_KEY'), 'utf8');
+  const nonce = Buffer.from(resource.nonce, 'utf8');
+  const ciphertext = Buffer.from(resource.ciphertext, 'base64');
+  const associatedData = Buffer.from(resource.associated_data || '', 'utf8');
+  let plaintext;
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, nonce);
+    decipher.setAuthTag(Buffer.from(resource.auth_tag, 'base64'));
+    decipher.setAAD(associatedData);
+    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch(e) { return {ok:false, error:'decrypt_failed'}; }
+  const data = JSON.parse(plaintext);
+  const paid = data.trade_state === 'SUCCESS';
+  return {ok:true, paid, out_trade_no: data.out_trade_no, trade_no: data.transaction_id, total: (data.amount?.total||0)/100, buyer: data.payer?.openid, trade_status: data.trade_state};
+}
+
+// ========== persistence ==========
+const MEM=new Map();
+function sb(){const u=get('SUPABASE_URL')||get('NEXT_PUBLIC_SUPABASE_URL');const k=get('SUPABASE_SERVICE_KEY')||get('SUPABASE_SERVICE_ROLE_KEY')||get('SUPABASE_KEY');return (u&&k)?{u:u.replace(/\/$/,''),k:k}:null;}
+function kv(){const u=get('KV_REST_API_URL')||get('UPSTASH_REDIS_REST_URL');const t=get('KV_REST_API_TOKEN')||get('UPSTASH_REDIS_REST_TOKEN');return (u&&t)?{u:u.replace(/\/$/,''),t:t}:null;}
+async function saveOrder(rec){
+  rec.updated_at=new Date().toISOString();
+  const s=sb();
+  if(s){try{
+    const r=await fetch(s.u+'/rest/v1/bds_orders',{method:'POST',headers:{apikey:s.k,Authorization:'Bearer '+s.k,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([rec]),signal:AbortSignal.timeout(8000)});
+    return {store:'supabase',ok:r.ok,status:r.status};
+  }catch(e){return {store:'supabase',ok:false,error:e.message};}}
+  const k=kv();
+  if(k){try{
+    const r=await fetch(k.u+'/set/bds_order_'+rec.out_trade_no,{method:'POST',headers:{Authorization:'Bearer '+k.t,'Content-Type':'application/json'},body:JSON.stringify(rec),signal:AbortSignal.timeout(8000)});
+    // 维护 ref -> out_trade_no 索引（listByRef 的 KV 回退依赖它；幂等去重）
+    if(rec.ref){
+      try{
+        const idx=await dbGet('orders_by_ref_'+rec.ref);
+        const arr=Array.isArray(idx)?idx:[];
+        if(arr.indexOf(rec.out_trade_no)<0){arr.push(rec.out_trade_no);await dbSet('orders_by_ref_'+rec.ref,arr);}
+      }catch(e){}
+    }
+    return {store:'kv',ok:r.ok,status:r.status};
+  }catch(e){return {store:'kv',ok:false,error:e.message};}}
+  const prev=MEM.get(rec.out_trade_no)||{};MEM.set(rec.out_trade_no,Object.assign(prev,rec));
+  return {store:'memory',ok:true};
+}
+async function getOrder(out){
+  const s=sb();
+  if(s){try{
+    const r=await fetch(s.u+'/rest/v1/bds_orders?out_trade_no=eq.'+encodeURIComponent(out)+'&select=*',{headers:{apikey:s.k,Authorization:'Bearer '+s.k},signal:AbortSignal.timeout(8000)});
+    const j=await r.json();return (Array.isArray(j)&&j[0])?j[0]:null;
+  }catch(e){return null;}}
+  const k=kv();
+  if(k){try{
+    const r=await fetch(k.u+'/get/bds_order_'+out,{headers:{Authorization:'Bearer '+k.t},signal:AbortSignal.timeout(8000)});
+    const j=await r.json();return j&&j.result?JSON.parse(j.result):null;
+  }catch(e){return null;}}
+  return MEM.get(out)||null;
+}
+async function countInvited(inv){
+  const s=sb();if(!s||!inv)return null;
+  try{
+    const r=await fetch(s.u+'/rest/v1/bds_orders?invited_by=eq.'+encodeURIComponent(inv)+'&status=eq.paid&select=out_trade_no',{headers:{apikey:s.k,Authorization:'Bearer '+s.k},signal:AbortSignal.timeout(8000)});
+    const j=await r.json();return Array.isArray(j)?j.length:0;
+  }catch(e){return null;}
+}
+async function listByRef(ref){
+  if(!ref)return [];
+  const s=sb();
+  if(s){try{
+    const r=await fetch(s.u+'/rest/v1/bds_orders?ref=eq.'+encodeURIComponent(ref)+'&status=eq.paid&select=slug,plan,out_trade_no,trade_no,amount',{headers:{apikey:s.k,Authorization:'Bearer '+s.k},signal:AbortSignal.timeout(8000)});
+    const j=await r.json();
+    if(Array.isArray(j)&&j.length)return j;
+  }catch(e){}}
+  // KV 回退: orders_by_ref_<ref> 索引 -> 逐单读取 bds_order_<out_trade_no>
+  // (修: 此前 listByRef 只查 Supabase，而 Vercel 部署无 Supabase → 付费用户的"已解锁列表"恒空)
+  try{
+    const idx=await dbGet('orders_by_ref_'+ref);
+    const arr=Array.isArray(idx)?idx:[];
+    const out=[];
+    for(const o of arr){
+      const rec=await getOrder(o);
+      if(rec&&rec.status==='paid')out.push({slug:rec.slug,plan:rec.plan,out_trade_no:rec.out_trade_no,trade_no:rec.trade_no,amount:rec.amount});
+    }
+    return out;
+  }catch(e){return [];}
+}
+function storeKind(){return sb()?'supabase':(kv()?'kv':(fileStore()?'file':'memory'));}
+const MEMKV=new Map();
+
+// 文件存储回退：仅当设置了 FILE_STORE_DIR 且没有远端存储时启用。
+// 用途: 自托管实例（无 KV）也能持久化订单/权益，而不是进程一重启就丢。
+// Vercel 上不设置该变量 → 行为完全不变（KV 优先）。
+function fileStore(){
+  try{const d=process.env.FILE_STORE_DIR;return (d&&String(d).trim())?String(d).trim():null;}catch(e){return null;}
+}
+function filePath(key){
+  const dir=fileStore();if(!dir)return null;
+  const safe=String(key).replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,180);
+  return dir+'/'+safe+'.json';
+}
+async function fileGet(key){
+  const p=filePath(key);if(!p)return null;
+  try{
+    const fs=require('node:fs/promises');
+    return JSON.parse(await fs.readFile(p,'utf8'));
+  }catch(e){return null;}
+}
+async function fileSet(key,val){
+  const p=filePath(key);if(!p)return false;
+  try{
+    const fs=require('node:fs/promises');
+    await fs.mkdir(fileStore(),{recursive:true});
+    const tmp=p+'.tmp';
+    await fs.writeFile(tmp,JSON.stringify(val),'utf8');
+    await fs.rename(tmp,p);        // 原子替换，避免半截文件
+    return true;
+  }catch(e){return false;}
+}
+async function dbGet(key){
+  const k=kv();
+  if(k){try{const r=await fetch(k.u+'/get/'+encodeURIComponent('bds_'+key),{headers:{Authorization:'Bearer '+k.t},signal:AbortSignal.timeout(8000)});const j=await r.json();return j&&j.result?JSON.parse(j.result):null;}catch(e){}}
+  const s=sb();
+  if(s){try{const r=await fetch(s.u+'/rest/v1/bds_kv?k=eq.'+encodeURIComponent(key)+'&select=v',{headers:{apikey:s.k,Authorization:'Bearer '+s.k},signal:AbortSignal.timeout(8000)});const j=await r.json();return (Array.isArray(j)&&j[0])?j[0].v:null;}catch(e){}}
+  if(fileStore()){const v=await fileGet(key);if(v!==null&&v!==undefined)return v;}
+  return MEMKV.has(key)?MEMKV.get(key):null;
+}
+async function dbSet(key,val){
+  const k=kv();
+  if(k){try{await fetch(k.u+'/set/'+encodeURIComponent('bds_'+key),{method:'POST',headers:{Authorization:'Bearer '+k.t,'Content-Type':'application/json'},body:JSON.stringify(val),signal:AbortSignal.timeout(8000)});return true;}catch(e){}}
+  const s=sb();
+  if(s){try{await fetch(s.u+'/rest/v1/bds_kv',{method:'POST',headers:{apikey:s.k,Authorization:'Bearer '+s.k,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify([{k:key,v:val}]),signal:AbortSignal.timeout(8000)});return true;}catch(e){}}
+  if(fileStore()&&await fileSet(key,val))return true;
+  MEMKV.set(key,val);return true;
+}
+const INVITE_CAP=50;
+async function arcBonus(ref){
+  const list=(await dbGet('arc_inv_'+ref))||[];
+  return {friends:list.length,bonusSeconds:Math.min(list.length,INVITE_CAP)*600};
+}
+
+// ---------- alipay calls ----------
+async function probePagePay(base){
+  const r=alipayParams({out_trade_no:'T'+Date.now(),total_amount:'0.01',subject:'probe',product_code:'FAST_INSTANT_TRADE_PAY'},'alipay.trade.page.pay',base);
+  if(r.error)return{error:r.error};
+  const res=await fetch('https://openapi.alipay.com/gateway.do',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(r.params).toString(),redirect:'manual',signal:AbortSignal.timeout(20000)});
+  let final=res.headers.get('location')||'';
+  const txt=final?'':await res.text();
+  let hops=0;
+  while(final&&hops<3&&/appAssign/.test(final)){const rr=await fetch(final,{redirect:'manual',signal:AbortSignal.timeout(15000)});const nx=rr.headers.get('location')||'';if(!nx)break;final=nx;hops++;}
+  const cashier=/excashier\.alipay\.com\/(standard\/)?auth\.htm|excashier\.alipay\.com\/cashier/.test(final);
+  const fish=/FISHING_RISK|钓鱼/.test(final)||/钓鱼/.test(txt);
+  let bizCode=null;try{const m=txt.match(/"code"\s*:\s*"(\d+)"/);if(m)bizCode=m[1];}catch(e){}
+  return {http:res.status,cashier:cashier,final:String(final).slice(0,160),code:bizCode,verdict:cashier?'PASS (已生成收银台订单)':(fish?'FISHING_RISK (服务端直连被风控;浏览器端实测正常)':'NO-PERM/ERROR')};
+}
+async function alipayQuery(outTradeNo,mode){
+  const APP=get('ALIPAY_APP_ID'),PRIV=getKey('ALIPAY_MERCHANT_PRIVATE_KEY');
+  if(!APP||!PRIV)return{error:'缺 ALIPAY_APP_ID/私钥'};
+  const params={app_id:APP,method:'alipay.trade.query',charset:'utf-8',sign_type:'RSA2',timestamp:ts(),version:'1.0',format:'JSON'};
+  const plainBiz=JSON.stringify({out_trade_no:outTradeNo});
+  const encrypted=mode==='plain'?plainBiz:aesEncrypt(plainBiz);
+  params.biz_content=encrypted;
+  if(encrypted!==plainBiz)params.encrypt_type='AES';
+  params.sign=signParams(params,PRIV);
+  const res=await fetch('https://openapi.alipay.com/gateway.do',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(params).toString(),signal:AbortSignal.timeout(20000)});
+  const txt=await res.text();let j={};try{j=JSON.parse(txt);}catch(e){return{http:res.status,raw:txt.slice(0,400)};}
+  let r=j.alipay_trade_query_response||{};
+  if((j.encrypt_type==='AES'||r.encrypt_type==='AES')&&typeof r==='string'){r=JSON.parse(aesDecrypt(r)||'{}');}
+  if(j.encrypt_type==='AES'&&typeof r==='string'&&r.indexOf('{')!==0){r={raw_cipher:r};}
+  const paid=(r.code==='10000'&&(r.trade_status==='TRADE_SUCCESS'||r.trade_status==='TRADE_FINISHED'));
+  return {http:res.status,code:r.code,msg:r.msg,sub:r.sub_code,trade_status:r.trade_status,trade_no:r.trade_no,buyer:r.buyer_logon_id||r.buyer_user_id,amount:r.total_amount,paid:!!paid,detail:r,resp_encrypt:!!(j.encrypt_type||r.encrypt_type)};
+}
+// readBody: 健壮版 — 处理空 body / 'end' 早触发 / 流 error / 半开连接, 加 30s 超时兜底, 绝不让 await 永挂
+// (旧版只监听 'data'+'end', 空 body 或 end 早于监听 / 流 error 时 Promise 永不 resolve -> webhook 路由 hang, 真支付回调会卡死)
+function readBody(req){
+  return new Promise(function(resolve){
+    var chunks=[]; var settled=false;
+    var timer=setTimeout(function(){ finish(); }, 30000); // 兜底: 异常流/半开连接 30s 强制结束
+    function finish(){
+      if(settled) return; settled=true;
+      clearTimeout(timer);
+      try{ req.removeListener('data', onData); req.removeListener('end', onEnd); req.removeListener('error', onErr); }catch(e){}
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    }
+    function onData(c){ if(!settled) chunks.push(c); }
+    function onEnd(){ finish(); }
+    function onErr(){ finish(); }
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onErr);
+    // ⚠️ 不能用 readable===false 短路: CN 的 shimReq=Object.create(req) 会让 readable 恒为 false 而 body 未读完,
+    //    短路会让 readBody 立即返回空 -> POST body (plan/ref/amount) 全丢 -> 订单默认 m10 + 收钱认不到人。
+    //    空 body 的 GET/HEAD/Content-Length:0 由调用处 skipBody 守卫处理 (见下方 raw 赋值), 这里正常等 data/end + 30s 兜底。
+  });
+}
+// 权威激活 (绝不静默丢): 失败重试 3 次; 仍失败写 bds_alert_active_fail 留痕 (hidden_realops 可扫到补激活), 返回 {ok,error?}
+async function robustActivate(ref,plan,outTradeNo,gateway){
+  let actRes=null;
+  for(let attempt=0;attempt<3&&!actRes;attempt++){
+    try{ actRes=await require('../lib/subwall.js').activate(ref,plan,{out_trade_no:outTradeNo}); }
+    catch(e){ actRes={ok:false,error:String(e&&e.message||e)}; }
+  }
+  if(!actRes||!actRes.ok){
+    try{
+      const al=await dbGet('bds_alert_active_fail');
+      const arr=al?JSON.parse(al):[];
+      arr.push({at:new Date().toISOString(),out_trade_no:outTradeNo,ref:ref,plan:plan,gateway:gateway||'alipay',error:(actRes&&actRes.error)||'activate_failed'});
+      while(arr.length>50)arr.shift();
+      await dbSet('bds_alert_active_fail',JSON.stringify(arr));
+    }catch(e){}
+    console.error('['+(gateway||'alipay')+'.activate] 激活失败已留痕 bds_alert_active_fail:',outTradeNo,plan,(actRes&&actRes.error));
+  }
+  return actRes;
+}
+function esc(v){return String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
+
+module.exports=async(req,res)=>{
+  const u=new URL((req.url||'/'),'http://x');
+  let route=u.searchParams.get('r')||u.pathname;
+  route='/'+String(route).replace(/^\/+/,'').replace(/^api\//,'');
+  if(route.indexOf('/api/')!==0)route='/api'+route;
+  const base=baseFrom(req);
+  const send=(c,o)=>{res.writeHead(c,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(o));};
+  const text=(c,s,ct)=>{res.writeHead(c,{'Content-Type':ct||'text/plain; charset=utf-8'});res.end(s);};
+  // 空 body 快速兜底: ① GET/HEAD 本无 body (Vercel @vercel/node 下 readBody 的 'end' 可能永不触发 -> 路由 hang);
+  // ② 显式 Content-Length:0 的空 body 同理。真实 webhook (支付宝/Stripe/微信) 永远带 body, 空 body 只来自畸形/探测请求,
+  // 直接跳过 readBody, 由各路由自身校验 fail-closed (400)。POST/PUT 且 Content-Length>0 或 chunked 仍正常读取。
+  const cl = String(req.headers['content-length'] || '');
+  // CN site_cn_server.mjs 预读 body 并 merge 进 URL (shimReq._bdsBodyInUrl), 此时不能重读流 (已消费->死锁)
+  const skipBody = (req.method === 'GET' || req.method === 'HEAD' || cl === '0' || req._bdsBodyInUrl === true);
+  const raw = skipBody ? '' : await readBody(req);
+  let form={};try{const u2=new URL(u.search.slice(1),'http://x');u2.searchParams.forEach((v,k)=>form[k]=v);}catch(e){}
+  if(raw){try{Object.assign(form,JSON.parse(raw));}catch(e){try{const u3=new URL('http://x/?'+raw);u3.searchParams.forEach((v,k)=>form[k]=v);}catch(e2){}}}
+  const data=Object.assign(Object.fromEntries(u.searchParams),form);
+  try{
+    // 营收看板 (revenue.html 数据源) — 只读真实台账 + 渠道账本 + timer, 不造假数据
+    if(route==='/api/revenue'){
+      try{
+        const fs=require('node:fs/promises');
+        const path=require('node:path');
+        // 1. 存量待收台账 (outreach + corporate, 金额字段: collect / corporate_amount)
+        async function ledgerItems(file){
+          try{
+            const raw=await fs.readFile(file,'utf8');
+            const d=JSON.parse(raw);
+            const arr=Array.isArray(d)?d:(d.items||d.orders||[]);
+            return arr.filter(x=>x&&typeof x==='object');
+          }catch(e){return [];}
+        }
+        const billingDir=process.env.BILLING_DIR||'/opt/bingdashan/data/billing';
+        const [outreach,corp]=await Promise.all([ledgerItems(path.join(billingDir,'outreach_ledger.json')),ledgerItems(path.join(billingDir,'corporate_899.json'))]);
+        const PENDING_ST=new Set(['paid','collected','done','verified']);
+        const pend=arr=>arr.filter(x=>!PENDING_ST.has(x.status));
+        const oPend=pend(outreach), cPend=pend(corp);
+        const oAmt=oPend.reduce((s,x)=>s+parseFloat(x.collect||x.amount||0),0);
+        const cAmt=cPend.reduce((s,x)=>s+parseFloat(x.corporate_amount||x.amount||0),0);
+        // 2. 各渠道账本 (谁付过钱 / 剩余额度) — 扫 FILE_STORE_DIR 下各渠道目录
+        const storeDir=process.env.FILE_STORE_DIR||'/var/lib/bingdashan-cn';
+        async function channelLedger(sub){
+          try{
+            const dir=path.join(storeDir,sub);
+            const files=await fs.readdir(dir);
+            let paid=0,quota=0,revenueYuan=0,revenueCoin=0;
+            for(const f of files){
+              if(!f.endsWith('.json'))continue;
+              try{
+                const o=JSON.parse(await fs.readFile(path.join(dir,f),'utf8'));
+                // 各渠道字段不一, 尽力汇总 (不造假: 读不到的留 0)
+                if(o.entries)paid+=o.entries.filter(e=>e.status==='active').length;
+                if(o.tasks)paid+=o.tasks.length;
+                quota+=o.quota||o.slots||o.seats||0;
+                revenueYuan+=o.revenue_yuan||0;
+                revenueCoin+=o.revenue_coin||0;
+              }catch(e){}
+            }
+            return {sub, has_ledger: files.length>0, paid_entries: paid, quota: quota, revenue_yuan: Math.round(revenueYuan), revenue_coin: Math.round(revenueCoin)};
+          }catch(e){return {sub, has_ledger:false, note:String(e.message).slice(0,40)};}
+        }
+        const CHANNEL_SUBS=['reportexport','strategyapi','marketdata','strategyhosting','overfitcheck','whitebox','papercombo','quantcompute','quantannual','cashback','bounty'];
+        const channels=await Promise.all(CHANNEL_SUBS.map(channelLedger));
+        // 3. 自动收钱线 timer 状态 (需 systemd, 仅 CN 可读; Vercel 上读不到就标 none)
+        function timerState(){
+          // CN: 通过 exec 查 systemd timer; 非 root/无 systemd 时 fail-closed 标 unknown
+          return {note:'timer 状态由 CN _revenue_dashboard.sh 单独读取, 网页只读台账+渠道 (不造假)'};
+        }
+        // 4. 诚实边界
+        return send(200,{
+          ok:true,
+          generated_at:new Date().toISOString(),
+          stock:{
+            outreach:{pending:oPend.length, amount_yuan:Math.round(oAmt)},
+            corporate:{pending:cPend.length, amount_yuan:Math.round(cAmt)},
+            total_pending_yuan:Math.round(oAmt+cAmt),
+            note:'待收≠已到账, 客户付/打款才核销进账'
+          },
+          channels:channels,
+          total_channel_revenue_yuan:channels.reduce((s,c)=>s+(c.revenue_yuan||0),0),
+          total_channel_revenue_coin:channels.reduce((s,c)=>s+(c.revenue_coin||0),0),
+          timers:timerState(),
+          honesty:'看板只读真实账本; "在线/有账本"≠"有收入", 有客户付才算; 无 100% 保证收益'
+        });
+      }catch(e){return send(500,{ok:false,error:'revenue read failed: '+e.message});}
+    }
+    // 创建付款单 → 返回自动提交的收银台表单
+    if(route==='/api/pay'){
+      const plan=data.plan||'m10';
+      const subMod=require('../lib/subwall.js');
+      const subPlan=subMod.plans[plan];
+      const isSub=!!(subPlan&&subPlan.cny>0);
+      const price=isSub?subPlan.cny:PLANS[plan];
+      if(!price){send(200,{ok:false,error:'未知套餐 plan='+plan});return;}
+      const slug=String(data.slug||'tool').slice(0,120);
+      const ref=String(data.ref||'').slice(0,32);
+      const inv=String(data.inv||'').slice(0,32);
+      const out=data.out_trade_no||('BDS_'+ref+'_'+plan+'_'+Date.now());
+      let pct=0;
+      const cnt=await countInvited(inv);
+      if(cnt!==null){pct=ladderPct(cnt);}
+      else{const cp=parseInt(data.pct,10);pct=(isFinite(cp)?Math.max(0,Math.min(70,cp)):0);}
+      const amount=(price*(1-pct/100)).toFixed(2);
+      // 付费渠道选择器状态 (C3~C6): 把选中策略/数据源/格式 持久化进订单, 供 record/purchase hook 读取
+      const selRec={ out_trade_no:out,slug:slug,ref:ref,invited_by:inv,plan:plan,kind:isSub?'sub':'unlock',list_price:String(price),pct:pct,amount:amount,status:'created' };
+      if(data.strategy_id) selRec.strategy_id=String(data.strategy_id).slice(0,64);
+      if(data.data_source) selRec.data_source=String(data.data_source).slice(0,64);
+      if(data.report_format) selRec.report_format=String(data.report_format).slice(0,8);
+      await saveOrder(selRec);
+      const r=alipayParams({out_trade_no:out,total_amount:amount,subject:String(data.subject||('bingdashan '+plan+' unlock')).replace(/[^\x20-\x7e]/g,'').slice(0,120)||('bingdashan '+plan),product_code:'FAST_INSTANT_TRADE_PAY',timeout_express:'15m'},'alipay.trade.page.pay',base,{passback_params:encodeURIComponent(JSON.stringify({slug:slug,plan:plan,ref:ref,inv:inv}))});
+      if(r.error){send(200,{ok:false,error:r.error});return;}
+      const html='<!DOCTYPE html><html><head><meta charset="utf-8"><title>正在跳转支付宝…</title></head><body style="font-family:system-ui;text-align:center;padding:40px">正在跳转支付宝收银台…<form id="f" action="https://openapi.alipay.com/gateway.do" method="POST" accept-charset="utf-8">'+Object.keys(r.params).map(k=>'<input type="hidden" name="'+k+'" value="'+esc(r.params[k])+'"/>').join('')+'</form><script>document.getElementById("f").submit();</script></body></html>';
+      text(200,html,'text/html; charset=utf-8');return;
+    }
+    // Stripe Checkout 会话创建（USD/国际卡）
+    if(route==='/api/stripe/checkout'){
+      const plan=data.plan||'pro';
+      const sp=stripeMod.SUB_PLANS[plan];
+      if(!sp){send(200,{ok:false,error:'unknown_plan'});return;}
+      const slug=String(data.slug||'tool').slice(0,120);
+      const ref=String(data.ref||'').slice(0,32);
+      const inv=String(data.inv||'').slice(0,32);
+      const out=data.out_trade_no||('BDS_'+ref+'_'+plan+'_'+Date.now());
+      await saveOrder({out_trade_no:out,slug:slug,ref:ref,invited_by:inv,plan:plan,kind:'sub',list_price:String(sp.usd),pct:0,amount:String(sp.usd),status:'created',currency:'usd'});
+      const session=await stripeMod.createCheckoutSession(base,plan,ref,slug,inv,out);
+      if(session.error){send(200,{ok:false,error:session.error});return;}
+      send(200,{ok:true,sessionId:session.sessionId,url:session.url});
+      return;
+    }
+    // Stripe Webhook
+    if(route==='/api/stripe/webhook'){
+      const sig=req.headers['stripe-signature']||'';
+      // ⚠️ 请求流只能读一次: 顶部已 readBody 存入 raw, 这里必须用 raw, 不能再 readBody(req) (二次读已消费流 -> 永不 end -> 300s hang)
+      const result=await stripeMod.verifyWebhook(raw,sig);
+      if(!result.ok){send(400,{ok:false,error:result.error});return;}
+      const handled=await stripeMod.handlePaymentSuccess(result.event,saveOrder,async(ref,plan,opts)=>require('../lib/subwall.js').activate(ref,plan,opts),async(inv,rec)=>require('../lib/commission.js').record(inv,rec));
+      send(200,handled);
+      return;
+    }
+    // WeChat Pay 下单（Native 扫码）
+    if(route==='/api/wxpay/create'){
+      const plan=data.plan||'pro';
+      const slug=String(data.slug||'tool').slice(0,120);
+      const ref=String(data.ref||'').slice(0,32);
+      const inv=String(data.inv||'').slice(0,32);
+      // 微信要求 out_trade_no 6-32 字符（[a-zA-Z0-9_-]）；长 ref 会拼出超长单号被拒
+      const out=data.out_trade_no||('BDSW_'+plan.slice(0,4)+'_'+Date.now().toString(36)+crypto.randomBytes(3).toString('hex')+(ref?'_'+ref:'')).replace(/[^a-zA-Z0-9_-]/g,'').slice(0,32);
+      let sp=PLANS[plan];
+      if(typeof sp==='number')sp={cny:sp};
+      if(!sp||!sp.cny){send(200,{ok:false,error:'unknown_plan'});return;}
+      await saveOrder({out_trade_no:out,slug:slug,ref:ref,invited_by:inv,plan:plan,kind:'sub',list_price:String(sp.cny),pct:0,amount:String(sp.cny),status:'created',currency:'cny',gateway:'wxpay'});
+      const result=await wxpayCreateOrder(base,plan,ref,slug,inv,out);
+      if(result.error){send(200,{ok:false,error:result.error});return;}
+      send(200,{ok:true,code_url:result.code_url,out_trade_no:out});
+      return;
+    }
+    // WeChat Pay 回调
+    if(route==='/api/wxpay/notify'){
+      // ⚠️ 请求流只能读一次: 顶部已 readBody 存入 raw, 这里用 raw (不能再 readBody(req) -> 二次读已消费流 -> 300s hang)
+      const headers={};
+      req.headers && Object.keys(req.headers).forEach(k=>{headers[k.toLowerCase()]=req.headers[k];});
+      const result=await wxpayHandleNotify(raw,headers);
+      if(result.ok&&result.paid){
+        const prev=(await getOrder(result.out_trade_no))||{};
+        await saveOrder(Object.assign({},prev,{out_trade_no:result.out_trade_no,trade_no:result.trade_no,buyer:result.buyer,amount:result.total,trade_status:result.trade_status,status:'paid',paid_at:new Date().toISOString(),currency:'cny'}));
+        if(prev.kind==='sub'&&prev.ref&&prev.status!=='paid'){
+          await robustActivate(prev.ref,prev.plan,result.out_trade_no,'wxpay');
+        }
+        if(prev.invited_by&&prev.invited_by!==prev.ref&&prev.status!=='paid'){
+          try{ await require('../lib/commission.js').record(prev.invited_by,{out_trade_no:result.out_trade_no,amount:result.total,plan:prev.plan,kind:prev.kind}); }catch(e){}
+        }
+        text(200,'SUCCESS');return;
+      }
+      text(400,'FAIL');return;
+    }
+    // 支付宝异步回调:验签 + 落库 + 权威激活(绝不静默丢激活), 必须返回纯文本 success
+    if(route==='/api/notify'){
+      const r=verifyNotify(data);
+      if(r.ok){
+        // 读原订单记录; 若丢失/不完整, 用 passback (下单时传入 slug/plan/ref/inv) 重建, 避免"收钱不认账"
+        let prev=(await getOrder(r.out_trade_no))||{};
+        const pb=r.passback||{};
+        if(!prev.ref&&pb.ref)prev.ref=pb.ref;
+        if(!prev.plan&&pb.plan)prev.plan=pb.plan;
+        if(!prev.slug&&pb.slug)prev.slug=pb.slug;
+        if(!prev.invited_by&&pb.inv)prev.invited_by=pb.inv;
+        if(!prev.kind&&prev.plan){
+          const sp=PLANS[prev.plan];
+          prev.kind=(sp&&sp.cny>0)?'sub':'unlock';
+        }
+        // 落库(检查结果): 即使落库失败也要继续激活(权益优先), 但记下来
+        const saveRes=await saveOrder(Object.assign({},prev,{out_trade_no:r.out_trade_no,trade_no:r.trade_no,buyer:r.buyer,amount:r.total,trade_status:r.trade_status,status:'paid',paid_at:new Date().toISOString()}));
+        // 订阅单: 支付成功 → 服务端权威激活。绝不静默吞错: 失败重试, 仍失败留痕 (Alipay 重推 notify 兜底)
+        if(prev.kind==='sub'&&prev.ref&&prev.status!=='paid'){
+          await robustActivate(prev.ref,prev.plan,r.out_trade_no,'alipay');
+        }
+        // 分佣: 推荐人获得佣金(幂等按 out_trade_no), 失败不阻塞主流程但留痕
+        if(prev.invited_by&&prev.invited_by!==prev.ref&&prev.status!=='paid'){
+          try{ await require('../lib/commission.js').record(prev.invited_by,{out_trade_no:r.out_trade_no,amount:r.total,plan:prev.plan,kind:prev.kind}); }catch(e){}
+        }
+        // 始终回 success (Alipay 要求纯文本 success 才停推; 激活失败已留痕待补, 靠重试/补激活兜底)
+        text(200,'success');return;
+      }
+      text(400,'fail');return;
+    }
+    // 查单:以支付宝为准(幂等),顺带回写落库
+    if(route==='/api/order'){
+      const out=String(data.out_trade_no||'');
+      if(!out){send(200,{ok:false,error:'缺 out_trade_no'});return;}
+      const rec0=(await getOrder(out))||{out_trade_no:out};
+      // 按网关分流：微信单查微信、其余查支付宝（源均为支付方权威，幂等回写）
+      if(rec0.gateway==='wxpay'){
+        const wq=await wxpayQueryOrder(out);
+        if(wq.paid){
+          await saveOrder(Object.assign({},rec0,{out_trade_no:out,trade_status:'SUCCESS',amount:wq.amount||rec0.amount,status:'paid',paid_at:(rec0&&rec0.paid_at)||new Date().toISOString()}));
+          if(rec0.kind==='sub'&&rec0.ref&&rec0.status!=='paid'){
+            await robustActivate(rec0.ref,rec0.plan,out,'wxpay');
+          }
+        }
+        send(200,{ok:true,paid:!!wq.paid,status:wq.paid?'paid':(rec0.status||'unknown'),trade_state:wq.trade_state||null,slug:rec0.slug||null,plan:rec0.plan||null,gateway:'wxpay'});
+        return;
+      }
+      const q=await alipayQuery(out);
+      const rec=(await getOrder(out))||{out_trade_no:out};
+      if(q.paid){
+        await saveOrder(Object.assign({},rec,{out_trade_no:out,trade_no:q.trade_no,buyer:q.buyer,amount:q.amount,trade_status:q.trade_status,status:'paid',paid_at:(rec&&rec.paid_at)||new Date().toISOString()}));
+        // 订阅单：查单确认支付成功同样激活（幂等，覆盖 notify 未达的情形）
+        if(rec.kind==='sub'&&rec.ref&&rec.status!=='paid'){
+          await robustActivate(rec.ref,rec.plan,out,'alipay');
+        }
+        if(rec.invited_by&&rec.invited_by!==rec.ref&&rec.status!=='paid'){
+          try{ await require('../lib/commission.js').record(rec.invited_by,{out_trade_no:out,amount:q.amount,plan:rec.plan,kind:rec.kind}); }catch(e){}
+        }
+        // 购物返现: 买家自己付费 -> 按比例返现到自己账本 (赚钱回路新维度)
+        if(rec.ref && rec.status==='paid'){
+          try{ await require('../lib/cashback.js').record(rec.ref,{out_trade_no:out,amount:q.amount,plan:rec.plan,kind:rec.kind,merchant:rec.slug||'self'}); }catch(e){}
+        }
+        // C3 付费导出报告: slug=report 的付费订单 -> 解锁该 ref 的报告导出权
+        if(rec.ref && rec.slug==='report' && rec.status==='paid'){
+          try{
+            await require('../lib/reportexport.js').record(rec.ref,{
+              strategy_id: String(rec.strategy_id||rec.plan||'default').slice(0,64),
+              format: String(rec.report_format||'pdf').slice(0,4),
+              version: String(rec.report_version||1).slice(0,16),
+              paid_via: 'alipay', out_trade_no: out
+            });
+          }catch(e){}
+        }
+        // C4 策略回测 API: slug=api 的付费订单 -> 充值该 ref 的 API 调用包额度 (带选中策略)
+        if(rec.ref && rec.slug==='api' && rec.status==='paid'){
+          try{
+            await require('../lib/strategyapi.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out, strategy_id: rec.strategy_id||'default' });
+          }catch(e){}
+        }
+        // C5 行情/市场情报订阅: slug=market 的付费订单 -> 充值该 ref 的订阅有效期 (带选中数据源)
+        if(rec.ref && rec.slug==='market' && rec.status==='paid'){
+          try{
+            await require('../lib/marketdata.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out, data_source: rec.data_source||'public_candles' });
+          }catch(e){}
+        }
+        // C6 策略托管+自动回测: slug=host 的付费订单 -> 充值该 ref 的托管有效期 (带托管策略+报告格式)
+        if(rec.ref && rec.slug==='host' && rec.status==='paid'){
+          try{
+            await require('../lib/strategyhosting.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out, strategy_id: rec.strategy_id||'default', report_format: rec.report_format||'pdf' });
+          }catch(e){}
+        }
+        // C7 过拟合检测: slug=ofit 的付费订单 -> 充值该 ref 的检测次数额度
+        if(rec.ref && rec.slug==='ofit' && rec.status==='paid'){
+          try{
+            await require('../lib/overfitcheck.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out });
+          }catch(e){}
+        }
+        // C8 团队/白标 API 包: slug=wb 的付费订单 -> 充值该 ref 的席位额度 (带白标 brand)
+        if(rec.ref && rec.slug==='wb' && rec.status==='paid'){
+          try{
+            await require('../lib/whitebox.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out, brand: String(rec.brand||'').slice(0,64) });
+          }catch(e){}
+        }
+        // C9 纸面模拟组合: slug=paper 的付费订单 -> 充值该 ref 的组合额度
+        if(rec.ref && rec.slug==='paper' && rec.status==='paid'){
+          try{
+            await require('../lib/papercombo.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out });
+          }catch(e){}
+        }
+        // C10 量化算力包: slug=qc 的付费订单 -> 充值该 ref 的算力 credits 池
+        if(rec.ref && rec.slug==='qc' && rec.status==='paid'){
+          try{
+            await require('../lib/quantcompute.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out });
+          }catch(e){}
+        }
+        // C12 量化算力订阅: slug=qannual 的付费订单 -> 开通该 ref 的订阅有效期 (月/年, 看金额区分)
+        if(rec.ref && rec.slug==='qannual' && rec.status==='paid'){
+          try{
+            var isYear = (parseFloat(rec.amount||0) >= 3000); // 年付¥3990 vs 月付¥399, 按金额判 cycle
+            await require('../lib/quantannual.js').purchase(rec.ref,{ paid_via:'alipay', out_trade_no:out, cycle: isYear ? 'year' : 'month' });
+          }catch(e){}
+        }
+      }
+      send(200,{ok:true,paid:!!q.paid,status:q.paid?'paid':(rec.status||'unknown'),trade_status:q.trade_status,trade_no:q.trade_no,slug:rec.slug||null,plan:rec.plan||null,code:q.code,sub:q.sub,msg:q.msg});
+      return;
+    }
+    // 按推荐人 ref 查已解锁工具(跨设备)
+    if(route==='/api/entitle'){
+      const ref=String(data.ref||'').slice(0,32);
+      if(!ref){send(200,{ok:false,error:'缺 ref'});return;}
+      if(storeKind()==='memory'){send(200,{ok:true,store:'memory',ref:ref,slugs:[]});return;}
+      const rows=await listByRef(ref);
+      const slugs=Array.from(new Set(rows.map(x=>x.slug).filter(Boolean)));
+      const cnt=await countInvited(ref);
+      send(200,{ok:true,store:storeKind(),ref:ref,slugs:slugs,orders:rows.length,plans:rows.map(x=>x.plan).filter(Boolean),friends:cnt,pct:ladderPct(cnt||0)});
+      return;
+    }
+    // AI 娱乐中心:时长状态 / 心跳 / 邀请奖励
+    if(route==='/api/arcade'){
+      const ref=String(data.ref||'').slice(0,32);
+      const by=String(data.by||'').slice(0,32);
+      const slugv=String(data.slug||'').slice(0,80);
+      const act=String(data.a||'state');
+      if(!ref){send(200,{ok:false,error:'缺 ref'});return;}
+      if(act==='invite'&&by&&by!==ref){
+        const list=(await dbGet('arc_inv_'+ref))||[];
+        if(list.indexOf(by)<0)list.push(by);
+        await dbSet('arc_inv_'+ref,list);
+        const inviterBonus=Math.min(list.length,INVITE_CAP)*600;
+        await dbSet('arc_bonus_'+ref,inviterBonus);
+        await dbSet('arc_bonus_'+by,Math.max(600,parseInt((await dbGet('arc_bonus_'+by))||0,10)||0));
+        const mine=await dbGet('arc_inv_'+by);
+        send(200,{ok:true,friends:list.length,bonusSeconds:inviterBonus,inviteeBonus:600,store:storeKind()});return;
+      }
+      // 服务器权威计费:免费额度一次性入账、心跳按服务器时钟扣钱,绝不信任客户端自报 bal
+      // 邀请奖励（friends/bonusSeconds）——修复：此前此处缺少 const b=await arcBonus(ref)，
+      // 导致 state 分支与 tick 分支均抛 ReferenceError(b is not defined)，心跳计费全线失效。
+      const b=await arcBonus(ref);
+      const freeLeft=parseInt((await dbGet('arc_free_'+ref))||0,10)||0;
+      if(!(await dbGet('arc_init_'+ref))&&freeLeft<=0){
+        await dbSet('arc_free_'+ref,FREE_SEC);
+        await dbSet('arc_init_'+ref,'1');
+      }
+      let balanceSeconds=parseInt((await dbGet('arc_bal_'+ref))||0,10)||0;
+      if(act==='tick'){
+        const now=Date.now();
+        const hb=parseInt((await dbGet('arc_hb_'+ref))||0,10)||0;
+        // 服务器自己计时:相邻两次心跳之间的真实时间(上限 90s,防刷新/跳时间戳刷秒)
+        let elapsed=0;
+        if(hb)elapsed=Math.max(0,Math.min(90,Math.floor((now-hb)/1000)));
+        await dbSet('arc_hb_'+ref,now);
+        if(slugv)await dbSet('arc_use_'+ref,{slug:slugv,at:new Date().toISOString()});
+        if(elapsed>0){
+          // 服务器权威计费（arcade_billing.js 纯函数，可单测）：
+          // 免费额度优先扣 → 邀请奖励只并入增量（水位账本 arc_bapp_）→ 扣付费/奖励余额。
+          // 修复：旧逻辑每 tick 把邀请奖励全额加回余额（balanceSeconds+effBonus-br），可无限刷时长。
+          const bonusTarget=Math.max(b.bonusSeconds,parseInt((await dbGet('arc_bonus_'+ref))||0,10)||0);
+          const bonusApplied=parseInt((await dbGet('arc_bapp_'+ref))||0,10)||0;
+          const out=billing.applyTick({freeLeft:await dbGet('arc_free_'+ref),bal:balanceSeconds,bonusTarget,bonusApplied},elapsed);
+          balanceSeconds=out.bal;
+          await dbSet('arc_bapp_'+ref,out.bonusApplied);
+          await dbSet('arc_free_'+ref,out.freeLeft);
+          await dbSet('arc_bal_'+ref,balanceSeconds);
+        }
+      }
+      const sb3=(await dbGet('arc_bonus_'+ref))||0;
+      const freeRemaining=parseInt((await dbGet('arc_free_'+ref))||0,10)||0;
+      // 服务端待付单（AutoOps 订单挽回写入 arc_pend_<ref>；只读，绝不触碰计费锚点）
+      let pending=null;
+      try{
+        const pv=await dbGet('arc_pend_'+ref);
+        if(pv&&parseInt(pv.expires_at||'0',10)>Date.now()) pending={plan:pv.plan,amount:pv.amount,pct:pv.pct||0,out_trade_no:pv.out_trade_no};
+      }catch(e){}
+      send(200,{ok:true,store:storeKind(),ref:ref,friends:b.friends,bonusSeconds:Math.max(b.bonusSeconds,parseInt(sb3,10)||0),balanceSeconds:balanceSeconds,freeSeconds:freeRemaining,pending:pending});return;
+    }
+    if(route==='/api/verify'){
+      const r=await probePagePay(base);
+      send(200,{ok:true,result:r,verdict:r.verdict||('ERROR '+(r.error||''))});
+      return;
+    }
+    if(route==='/api/aliq'){
+      const out=String(data.out_trade_no||'BDS_ALIQ_PROBE_'+(Date.now()%1000000));
+      const mode=String(data.mode||(get('ALIPAY_AES_KEY')?'aes':'plain'));
+      const q=await alipayQuery(out,mode);
+      const body={ok:true,probe:'alipay.trade.query',out_trade_no:out,mode:mode,aes_configured:!!get('ALIPAY_AES_KEY'),result:q};
+      if(String(data.debug)==='1')body.sig_fp=privFingerprint();
+      send(200,body);return;
+    }
+    if(route==='/api/paid'){
+      send(200,{ok:true,received:data,base:base,store:storeKind()});return;
+    }
+    if(route==='/api/config'){send(200,{ok:true,app_id:get('ALIPAY_APP_ID'),account:get('ALIPAY_ACCOUNT'),base:base,store:storeKind(),plans:PLANS,wallets:WALLETS,ready:!!(get('ALIPAY_APP_ID')&&getKey('ALIPAY_MERCHANT_PRIVATE_KEY')&&getKey('ALIPAY_ALIPAY_PUBLIC_KEY'))});return;}
+    // 币结算: 把「用户自己挣的币」结算到 owner 指定钱包 (coinbase)。
+    // 合规: 只生成「待人工确认」结算单, 不自动打款 (无付款密钥)。
+    // 红线: 拒扫全网无主资金/airdrop 据为己有 -> 抽佣收进此钱包。
+    if(route==='/api/coinsettle'){
+      // ---- 预览: 看「结算会打到哪」(不需密钥, 只回显可用目标 + 默认 + 合规门) ----
+      if(data.preview||data.dest==='preview'){
+        const validDest=Object.keys(WALLETS).filter(function(k){ return WALLETS[k].enabled && !WALLETS[k].is_contract; });
+        return send(200,{ok:true,
+          default_dest:String(get('COINSETTLE_DEFAULT_DEST')||'owner_coinbase'),
+          valid_dests:validDest.map(function(k){ return {key:k, chain:WALLETS[k].chain, addr:WALLETS[k].address, role:WALLETS[k].role}; }),
+          usdc_base_contract:'0x833589fCD2e695B55A1C68A696f0810f2C3AD36C',
+          payout_chain:String(get('COINSETTLE_PAYOUT_CHAIN')||'base'),
+          live:String(get('COINSETTLE_CONFIRM_LIVE')||'false'),
+          key_file:String(get('COINBASE_PAYOUT_PRIVATE_KEY_FILE')||'(none)'),
+          note:'未配密钥时 confirm 走 dry-run; 实转需 key_file 存在 + live=true + 白名单 ref + 请求 live=true',
+        });
+      }
+      // ---- 分支: 确认打款 (confirm=<settle_id>) ----
+      // 合规 + fail-closed: 默认 dry-run (不转真钱), 需 owner 付款密钥 + CONFIRM_LIVE=true 才实转。
+      // 白名单 ref (COINSETTLE_ALLOW_REFS) 外的 ref 一律拒, 避免任意人触发转账。
+      if(data.confirm){
+        const settleId=String(data.confirm);
+        // 1. 读该结算单
+        let raw=null;
+        try{ raw=await dbGet('coinsettle:'+settleId); }catch(e){}
+        let entry=null;
+        try{ entry=raw?JSON.parse(raw):null; }catch(e){}
+        if(!entry) return send(404,{ok:false,error:'settle_not_found',note:'结算单不存在 (先 /api/coinsettle 生成)'});
+        // 2. 状态必须是 pending (已打/已拒 不重复转)
+        if(entry.status==='settled') return send(400,{ok:false,error:'already_settled',note:'该结算单已打款, 不重复转'});
+        if(entry.status==='rejected') return send(400,{ok:false,error:'already_rejected'});
+        if(entry.source!=='earned') return send(400,{ok:false,error:'compliance_redline',note:'只有 earned(自己挣的币) 可打款 (合规红线)'});
+        // 3. ref 白名单 (owner 显式登记的 ref)
+        const allow=(get('COINSETTLE_ALLOW_REFS')||'').split(',').map(x=>x.trim()).filter(Boolean);
+        if(allow.length>0 && allow.indexOf(entry.ref)<0) return send(403,{ok:false,error:'ref_not_whitelisted',note:'该 ref 未登记打款白名单, 拒 (防任意人触发转账)'});
+        // 4. 付款密钥 (owner 指定付款钱包私钥) — getKey 支持 env 或 _FILE (CN 自托管放文件, 不进 env)
+        const pkey=getKey('COINBASE_PAYOUT_PRIVATE_KEY');
+        const live=String(data.live||'')==='true' && String(get('COINSETTLE_CONFIRM_LIVE')||'')==='true';
+        if(!pkey){
+          // 没密钥: 永远 dry-run (诚实: 不实转)
+          return send(200,{ok:true,dry_run:true,settle_id:settleId,
+            note:'未配置 COINBASE_PAYOUT_PRIVATE_KEY -> 仅 dry-run, 不转真钱; 需 owner 配密钥 + COINSETTLE_CONFIRM_LIVE=true 才实转',
+            tx_plan:{chain:entry.dest_chain,from:'(owner payout wallet)',to:entry.dest_address,amount:entry.amount,asset:entry.asset}});
+        }
+        // 5. dry-run (默认): 不实转; 若配了密钥则做只读探查 (余额/nonce/地址), 让你确认付款钱包在对的链上有钱
+        if(!live){
+          const probe={key_configured:true,chain:entry.dest_chain,usdc_amount:entry.amount,to:entry.dest_address};
+          // 只读: 用 viem 查付款钱包在目标链的 native 余额 + USDC 余额 + 派生地址 (不转账)
+          try{
+            const viem=require('viem');
+            const chainName=String(get('COINSETTLE_PAYOUT_CHAIN')||entry.dest_chain||'Base').toLowerCase();
+            const RPCS={base:'https://mainnet.base.org',ethereum:'https://eth-mainnet.g.alchemy.com/v2/demo',arbitrum:'https://arb-mainnet.g.alchemy.com/v2/demo'};
+            const rpc=String(get('COINBASE_PAYOUT_RPC')||RPCS[chainName]||RPCS.base);
+            const USDC_MAP={base:'0x833589fCD2e695B55A1C68A696f0810f2C3AD36C',ethereum:'0xA0b86991c6218b36c1d19D4a2e9Eb0cEd3601E9C',arbitrum:'0xaf88d065977e8652a169d3f608891cc4c3fd9d4c'};
+            const usdcC=USDC_MAP[chainName]||USDC_MAP.base;
+            // 派生付款地址: 用 ethers (CN 已装, 权威正确派生), viem build 缺本地签 API
+            let addr=null;
+            try{
+              const ethers=require('ethers');
+              addr=new ethers.Wallet(pkey.replace(/^0x/,'')).address.toLowerCase();
+            }catch(e2){}
+            if(addr){
+              probe.payout_wallet=addr;
+              const pub=viem.createPublicClient({transport:viem.http(rpc)});
+              const bal=await pub.getBalance({address:addr}).catch(function(){return null;});
+              if(bal!=null) probe.native_balance_wei=bal.toString();
+              const erc=viem.parseAbiItem('function balanceOf(address a) view returns (uint256)');
+              const ub=await pub.readContract({address:usdcC,abi:[erc],fn:'balanceOf',args:[addr]}).catch(function(){return null;});
+              if(ub!=null) probe.usdc_balance=String(ub);
+            } else { probe.probe_note='未能派生付款地址 (viem build 缺 privateKeyToAccount), 余额未查; 不影响 dry-run 不实转'; }
+          }catch(e){ probe.probe_note='只读探查失败 (不影响 dry-run 不实转): '+String(e.message||e).slice(0,80); }
+          return send(200,{ok:true,dry_run:true,settle_id:settleId,
+            note:'dry-run (默认): 未开 COINSETTLE_CONFIRM_LIVE=true, 不转真钱; 付款钱包只读探查见 probe',
+            probe:probe,
+            tx_plan:{chain:entry.dest_chain,to:entry.dest_address,amount:entry.amount,asset:entry.asset}});
+        }
+        // 6. LIVE 实转 (需密钥 + 白名单 + earned + 显式 live)
+        //    突破: 本 viem build 不能本地私钥签名 -> 改用 ethers (CN 已装) 权威本地签 + 广播。
+        //    fail-closed: 余额不足 / 签名库缺失 / RPC 错 / 地址不符 -> 不动账, 结算单保持 pending。
+        try{
+          const chainName=String(get('COINSETTLE_PAYOUT_CHAIN')||entry.dest_chain||'Base').toLowerCase();
+          const USDC_CONTRACTS={
+            base:'0x833589fCD2e695B55A1C68A696f0810f2C3AD36C',
+            ethereum:'0xA0b86991c6218b36c1d19D4a2e9Eb0cEd3601E9C',
+            arbitrum:'0xaf88d065977e8652a169d3f608891cc4c3fd9d4c'
+          };
+          const CHAIN_ID={base:8453,ethereum:1,arbitrum:42161};
+          const RPCS={base:'https://mainnet.base.org',ethereum:'https://eth-mainnet.g.alchemy.com/v2/demo',arbitrum:'https://arb-mainnet.g.alchemy.com/v2/demo'};
+          const chainId=Number(get('COINSETTLE_PAYOUT_CHAIN_ID')||(CHAIN_ID[chainName]||8453));
+          const rpcUrl=String(get('COINBASE_PAYOUT_RPC')||RPCS[chainName]||RPCS.base);
+          const usdcAddr=String(get('COINSETTLE_USDC_ADDRESS')||USDC_CONTRACTS[chainName]||USDC_CONTRACTS.base);
+          const Dhex=pkey.replace(/^0x/,'');
+          // (a) ethers 本地钱包: 正确派生地址 + 本地签
+          const ethers=require('ethers');
+          const w=new ethers.Wallet(Dhex);
+          const fromAddr=w.address.toLowerCase();
+          // 自洽: 若登记了预期付款地址, 必须一致 (防密钥放错)
+          const expectFrom=String(get('COINSETTLE_PAYOUT_ADDRESS')||'').toLowerCase();
+          if(expectFrom && fromAddr!==expectFrom){
+            return send(500,{ok:false,error:'payout_addr_mismatch',got:fromAddr,expected:expectFrom,
+              note:'派生付款地址与登记不符 (fail-closed, 未发 tx); 核对 COINBASE_PAYOUT_PRIVATE_KEY'});
+          }
+          // (b) 查付款钱包 USDC 余额 (防空钱包发注定失败 tx)
+          const provider=new ethers.JsonRpcProvider(rpcUrl, chainId);
+          const erc=new ethers.Contract(usdcAddr,['function balanceOf(address) view returns (uint256)','function transfer(address,uint256) returns (bool)'],provider);
+          const rawAmt=String(Math.round(entry.amount*Math.pow(10,6)));
+          const bal=await erc.balanceOf(fromAddr).catch(function(){return null;});
+          if(bal!=null && BigInt(bal)<BigInt(rawAmt)){
+            return send(500,{ok:false,error:'insufficient_usdc',from:fromAddr,have:bal.toString(),want:rawAmt,
+              note:'付款钱包 USDC 不足 (fail-closed, 未发 tx, 结算单保持 pending), 先充 '+entry.asset+' 到 '+fromAddr});
+          }
+          // (c) 收款目标合法校验
+          const to=String(entry.dest_address);
+          if(!ethers.isAddress(to))return send(500,{ok:false,error:'bad_dest',note:'收款地址非法 (fail-closed)'});
+          // (d) 本地签 + 广播
+          const tx=await erc.connect(w).transfer(to,BigInt(rawAmt));
+          await tx.wait();
+          const newStatus={...entry,status:'settled',tx_hash:tx.hash,from:fromAddr,settled_at:new Date().toISOString(),chain:chainName};
+          try{ await dbSet('coinsettle:'+settleId,JSON.stringify(newStatus)); }catch(e){}
+          return send(200,{ok:true,dry_run:false,settle_id:settleId,tx_hash:tx.hash,chain:chainName,from:fromAddr,
+            note:'已上链打款 ('+entry.asset+' -> '+to+'), 结算单置 settled; from='+fromAddr,
+            usdc_contract:usdcAddr,dest:to,amount:entry.amount});
+        }catch(e){
+          if(String(e.message||e).indexOf('Cannot find module')>=0){
+            return send(500,{ok:false,error:'signer_unavailable',note:'缺 ethers 签名库 (fail-closed, 未发 tx), 结算单保持 pending'});
+          }
+          return send(500,{ok:false,error:'payout_failed',detail:String(e.message||e).slice(0,200),
+            note:'链上打款失败, 结算单保持 pending (fail-closed, 未扣款)'});
+        }
+      }
+      // ---- 主流程: 生成待确认结算单 (source=earned) ----
+      const ref=String(data.ref||'').trim();
+      const amount=Number(data.amount||0);
+      const asset=String(data.asset||'USDC').toUpperCase();
+      // 默认收款目标: 优先 COINSETTLE_DEFAULT_DEST (CN 设为 base_receive), 否则 owner_coinbase
+      const dest=String(data.dest||get('COINSETTLE_DEFAULT_DEST')||'owner_coinbase');
+      const source=String(data.source||'').toLowerCase();   // earned | unowned | airdrop | unknown
+      const destWallet=WALLETS[dest];
+      if(!ref)return send(400,{ok:false,error:'missing_ref'});
+      if(!(amount>0))return send(400,{ok:false,error:'invalid_amount',note:'金额须>0'});
+      if(!destWallet)return send(400,{ok:false,error:'unknown_dest_wallet',note:'目标钱包未配置'});
+      // 合规红线: dest 必须是 WALLETS 里 owner 登记的、enabled 的收款钱包 (非合约/非无主池子)。
+      //   真正的反滥用靠 source=earned 那道门 (下面); 这里只确保目标是 owner 指定钱包。
+      if(!destWallet.enabled || destWallet.is_contract){
+        return send(400,{ok:false,error:'compliance_redline',note:'只能结算到 owner 登记的收款钱包 (合规红线: 不打到合约/无主池子)'});
+      }
+      // 合规红线: 只有「用户自己挣的币」(source=earned) 才可结算; 无主/airdrop 一律拒
+      //   服务端无法验证链上来源, 故靠 source 声明 + 渠道账本来源 (写作/返现/劳动/带宽 都是 earned)。
+      //   unowned / airdrop / 缺 source -> 拒 (绝不据他人无主资金抽佣)。
+      if(source!=='earned' && source!==''){
+        return send(400,{ok:false,error:'compliance_redline',note:'只结算「自己挣的币」(source=earned); 无主资金/airdrop 据为己有=违法, 拒'});
+      }
+      if(source===''){
+        return send(400,{ok:false,error:'missing_source',note:'须 source=earned (自己挣的币); 缺来源拒 (合规红线)'});
+      }
+      // 生成待人工确认结算单 (不自动打款)
+      const settleId='CS_'+ref+'_'+Date.now().toString(36).toUpperCase();
+      const entry={id:settleId,ref:ref,asset:asset,amount:amount,
+        source:source,dest:dest,dest_address:destWallet.address,dest_chain:destWallet.chain,
+        status:'pending_manual_confirmation',at:new Date().toISOString()};
+      // 落账 (CN 文件 / Vercel KV) — 诚实: 只记「待确认」, 不静默转账
+      try{ await dbSet('coinsettle:'+settleId, JSON.stringify(entry)); }catch(e){}
+      send(200,{ok:true,entry:entry,note:'已生成待人工确认结算单; 实际打款需 owner 付款密钥 + 合规确认, 服务端不自动转账'});
+      return;
+    }
+    if(route==='/api/health'){send(200,{ok:true,env:{app:!!get('ALIPAY_APP_ID'),priv:!!getKey('ALIPAY_MERCHANT_PRIVATE_KEY'),pub:!!getKey('ALIPAY_ALIPAY_PUBLIC_KEY'),supabase:!!sb(),kv:!!kv()},store:storeKind()});return;}
+    // Morning-Youth 独立路由
+    // 注意：morning-youth.js 导出 {onRequest,plans} 非标准 Vercel handler，
+    // 必须经本分发器转发；rewrite 会把子路径放 __path（如 morning-youth/config）。
+    if(route.startsWith('/api/morning-youth')||u.pathname.indexOf('/api/morning-youth')===0){
+      try{
+        const mod = require('../lib/morning-youth.js');
+        // 恢复原始子路径：优先 rewrite 的 __path，其次原始 pathname，最后 r 参数
+        const subRaw = String(u.searchParams.get('__path')||'').replace(/^\/+/,'').replace(/^api\//,'');
+        let myPath = route;
+        if(subRaw && subRaw.indexOf('morning-youth')===0) myPath = '/api/'+subRaw;
+        else if(u.pathname.indexOf('/api/morning-youth')===0) myPath = u.pathname;
+        data.path = myPath;
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'morning-youth handler error: '+e.message});
+      }
+      return;
+    }
+    // 订阅墙 独立路由
+    if(route.startsWith('/api/subwall')){
+      try{
+        const mod = require('../lib/subwall.js');
+        // 保持原始 path 给 subwall；同时透传 window.__SUBWALL_REF__ 身份（若配置了）
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'subwall handler error: '+e.message});
+      }
+      return;
+    }
+    // 分佣账本 独立路由
+    if(route.startsWith('/api/commission')){
+      try{
+        const mod = require('../lib/commission.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'commission handler error: '+e.message});
+      }
+      return;
+    }
+    // 购物返现账本 独立路由 (赚钱回路新维度: 用户自己购物按比例返现)
+    if(route.startsWith('/api/cashback')){
+      try{
+        const mod = require('../lib/cashback.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'cashback handler error: '+e.message});
+      }
+      return;
+    }
+    // 写作赚币账本 独立路由 (赚钱回路新维度: 投稿内容得币, 服务端质量门禁防刷)
+    if(route.startsWith('/api/writerewards')){
+      try{
+        const mod = require('../lib/writerewards.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'writerewards handler error: '+e.message});
+      }
+      return;
+    }
+    // 劳动换币 (bounty) 账本 独立路由 (赚钱回路新维度: 完成任务得币, 服务端证据校验防刷)
+    if(route.startsWith('/api/bounty')){
+      try{
+        const mod = require('../lib/bounty.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'bounty handler error: '+e.message});
+      }
+      return;
+    }
+    // 公益基金 (charity) 账本 独立路由 (赚钱回路新维度: 捐赠透明账本)
+    if(route.startsWith('/api/charity')){
+      try{
+        const mod = require('../lib/charity.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'charity handler error: '+e.message});
+      }
+      return;
+    }
+    // 带宽/闲置资源共享 (bandwidth) 账本 独立路由 (赚钱回路新维度: 共享闲置带宽得币)
+    if(route.startsWith('/api/bandwidth')){
+      try{
+        const mod = require('../lib/bandwidth.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'bandwidth handler error: '+e.message});
+      }
+      return;
+    }
+    // 找回被遗忘资产 (recovery) 账本 独立路由 (赚钱回路新维度: 仅本人/已授权资产, 拒扫描他人无主资金)
+    if(route.startsWith('/api/recovery')){
+      try{
+        const mod = require('../lib/recovery.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'recovery handler error: '+e.message});
+      }
+      return;
+    }
+    // 付费导出专业回测报告 (reportexport) — C3 合规渠道: 付费(币/¥)解锁 PDF/CSV 导出, 内置合规免责
+    if(route.startsWith('/api/reportexport')){
+      try{
+        const mod = require('../lib/reportexport.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'reportexport handler error: '+e.message});
+      }
+      return;
+    }
+    // 付费策略回测 API (strategyapi) — C4 合规渠道: 按调用量购买, 币/¥双付, 内置合规免责
+    if(route.startsWith('/api/strategyapi')){
+      try{
+        const mod = require('../lib/strategyapi.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'strategyapi handler error: '+e.message});
+      }
+      return;
+    }
+    // 行情/市场情报数据订阅 (marketdata) — C5 合规渠道: 按月订阅, 币/¥双付, 内置合规免责
+    if(route.startsWith('/api/marketdata')){
+      try{
+        const mod = require('../lib/marketdata.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'marketdata handler error: '+e.message});
+      }
+      return;
+    }
+    // 付费策略托管+自动回测 (strategyhosting) — C6 合规渠道: 订阅制, 币/¥双付, 内置合规免责
+    if(route.startsWith('/api/strategyhosting')){
+      try{
+        const mod = require('../lib/strategyhosting.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'strategyhosting handler error: '+e.message});
+      }
+      return;
+    }
+    // 过拟合检测 API (overfitcheck) — C7 合规渠道: 付费检测, 币/¥双付, 统计辅助非投资建议
+    if(route.startsWith('/api/overfitcheck')){
+      try{
+        const mod = require('../lib/overfitcheck.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'overfitcheck handler error: '+e.message});
+      }
+      return;
+    }
+    // 团队/白标 API 包 (whitebox) — C8 合规渠道: 按席位/白标授权, B端高客单价
+    if(route.startsWith('/api/whitebox')){
+      try{
+        const mod = require('../lib/whitebox.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'whitebox handler error: '+e.message});
+      }
+      return;
+    }
+    // 付费纸面模拟组合 (papercombo) — C9 合规渠道: 多资产纸面持仓, 真K线真指标, 非实盘
+    if(route.startsWith('/api/papercombo')){
+      try{
+        const mod = require('../lib/papercombo.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'papercombo handler error: '+e.message});
+      }
+      return;
+    }
+    // 量化算力包 (quantcompute) — C10 合规渠道: 按 credits 团队共享池, 高客单价
+    if(route.startsWith('/api/quantcompute')){
+      try{
+        const mod = require('../lib/quantcompute.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'quantcompute handler error: '+e.message});
+      }
+      return;
+    }
+    // 量化算力年费/包月订阅 (quantannual) — C12 合规渠道: 锁客持续进账, 最高客单价
+    if(route.startsWith('/api/quantannual')){
+      try{
+        const mod = require('../lib/quantannual.js');
+        data.path = route;
+        if(!data.ref){
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+          if(pid)data.ref=pid;
+        }
+        return await mod.onRequest(req,res,data);
+      }catch(e){
+        send(500,{ok:false,error:'quantannual handler error: '+e.message});
+      }
+      return;
+    }
+        // C13 另类数据订阅 (alternative_data) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/alternative_data')){
+
+      try{
+
+        const mod = require('../lib/alternative_data.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'alternative_data handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C14 历史回测存档 (backtest_history) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/backtest_history')){
+
+      try{
+
+        const mod = require('../lib/backtest_history.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'backtest_history handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C15 联合品牌产品 (co_brand_product) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/co_brand_product')){
+
+      try{
+
+        const mod = require('../lib/co_brand_product.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'co_brand_product handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C16 自定义指标库 (custom_indicators) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_indicators')){
+
+      try{
+
+        const mod = require('../lib/custom_indicators.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_indicators handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C17 定制集成开发 (custom_integration) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_integration')){
+
+      try{
+
+        const mod = require('../lib/custom_integration.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_integration handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C13 另类数据订阅 (alternative_data) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/alternative_data')){
+
+      try{
+
+        const mod = require('../lib/alternative_data.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'alternative_data handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C14 历史回测存档 (backtest_history) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/backtest_history')){
+
+      try{
+
+        const mod = require('../lib/backtest_history.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'backtest_history handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C15 联合品牌产品 (co_brand_product) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/co_brand_product')){
+
+      try{
+
+        const mod = require('../lib/co_brand_product.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'co_brand_product handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C16 自定义指标库 (custom_indicators) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_indicators')){
+
+      try{
+
+        const mod = require('../lib/custom_indicators.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_indicators handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C17 定制集成开发 (custom_integration) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_integration')){
+
+      try{
+
+        const mod = require('../lib/custom_integration.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_integration handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C13 另类数据订阅 (alternative_data) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/alternative_data')){
+
+      try{
+
+        const mod = require('../lib/alternative_data.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'alternative_data handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C14 历史回测存档 (backtest_history) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/backtest_history')){
+
+      try{
+
+        const mod = require('../lib/backtest_history.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'backtest_history handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C15 联合品牌产品 (co_brand_product) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/co_brand_product')){
+
+      try{
+
+        const mod = require('../lib/co_brand_product.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'co_brand_product handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C16 自定义指标库 (custom_indicators) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_indicators')){
+
+      try{
+
+        const mod = require('../lib/custom_indicators.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_indicators handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+    // C17 定制集成开发 (custom_integration) — 合规渠道: 按次付费, 币¥双付
+
+    if(route.startsWith('/api/custom_integration')){
+
+      try{
+
+        const mod = require('../lib/custom_integration.js');
+
+        data.path = route;
+
+        if(!data.ref){
+
+          const pid = String((req.headers['x-ref']||req.headers['x-user-ref']||'')||'').slice(0,64);
+
+          if(pid)data.ref=pid;
+
+        }
+
+        return await mod.onRequest(req,res,data);
+
+      }catch(e){
+
+        send(500,{ok:false,error:'custom_integration handler error: '+e.message});
+
+      }
+
+      return;
+
+    }
+
+send(404,{ok:false,error:'not found',route:route});
+  }catch(e){send(500,{ok:false,error:e.message,stack:(e.stack||'').split('\n').slice(0,3)});}
+};
