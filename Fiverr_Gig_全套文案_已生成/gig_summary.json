@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-11-17T07:39:53.312602+00:00",
+  "total_gigs": 4,
+  "gigs": {
+    "python_automation": {
+      "path": "F:\\2026\\第三轮\\Fiverr_Gig_全套文案_已生成\\gig_python_automation.json",
+      "title": "I will build custom python automation scripts for your business"
+    },
+    "web_scraper": {
+      "path": "F:\\2026\\第三轮\\Fiverr_Gig_全套文案_已生成\\gig_web_scraper.json",
+      "title": "I will build a professional web scraper and data extractor"
+    },
+    "discord_bot": {
+      "path": "F:\\2026\\第三轮\\Fiverr_Gig_全套文案_已生成\\gig_discord_bot.json",
+      "title": "I will build a custom discord bot with advanced features"
+    },
+    "data_analysis": {
+      "path": "F:\\2026\\第三轮\\Fiverr_Gig_全套文案_已生成\\gig_data_analysis.json",
+      "title": "I will analyze your data and create interactive reports"
+    }
+  }
+}

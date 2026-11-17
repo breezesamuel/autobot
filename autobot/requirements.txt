@@ -1,0 +1,16 @@
+# AutoBot Requirements — Python 标准库优先，可选增强依赖
+# 核心模块全部使用 stdlib，无需额外安装即可运行基础功能
+
+# ── 必需（已安装）──────────────────────────────────────────────────────────────
+# playwright>=1.40.0   ← 已安装 1.63.0
+# httpx>=0.27.0        ← 已安装 0.28.1
+# schedule>=1.2.0      ← 已安装 1.2.2
+# anthropic>=0.30.0    ← 已安装 0.76.0
+# openai>=1.0.0        ← 已安装 2.26.0
+
+# ── 可选增强（按需安装）────────────────────────────────────────────────────────
+# cryptography>=42.0.0  # make.fun Ed25519 签名（替代 hmac 占位实现）
+# nacl>=1.5.0           # libsodium bindings（make.fun entry 签名）
+# pygithub>=2.3.0       # GitHub API 高级封装（当前用纯 urllib 已足够）
+# APScheduler>=3.10     # 更强大的 Cron 调度器（替代 schedule）
+# python-dotenv>=1.0.0  # .env 文件加载

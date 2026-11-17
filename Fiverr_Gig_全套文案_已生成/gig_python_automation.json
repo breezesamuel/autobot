@@ -1,0 +1,47 @@
+{
+  "title": "I will build custom python automation scripts for your business",
+  "category": "Programming & Tech",
+  "subcategory": "Scripting & Automation",
+  "tags": [
+    "python",
+    "automation",
+    "script",
+    "programming",
+    "freelance"
+  ],
+  "description": "Tired of doing repetitive tasks by hand? I'll create a Python script that automates your workflow and saves you hours every week.\n\n✅ SERVICES INCLUDE:\n• File organization and batch processing\n• Web scraping and data extraction  \n• Email automation and scheduling\n• Excel/CSV data manipulation\n• API integration and webhooks\n• PDF generation and conversion\n\n✅ WHY WORK WITH ME:\n✓ Fast delivery (often same day)\n✓ Clean, documented code\n✓ Free consultation before order\n✓ Unlimited revisions until satisfied\n\n🔧 TECH STACK: Python 3.x, Selenium, BeautifulSoup, Pandas, Requests, Twilio, Zapier API\n\n💬 MESSAGE ME FIRST to discuss your project needs!",
+  "packages": {
+    "basic": {
+      "price": 50,
+      "delivery_days": 1,
+      "revisions": 1,
+      "desc": "Simple single-task script (file org, scraper). Delivery: 1 day."
+    },
+    "standard": {
+      "price": 150,
+      "delivery_days": 3,
+      "revisions": 3,
+      "desc": "Multi-task workflow + DB integration. Delivery: 2-3 days."
+    },
+    "premium": {
+      "price": 300,
+      "delivery_days": 7,
+      "revisions": -1,
+      "desc": "Full solution: API/webhook integration + deployment. Unlimited revisions + 30-day support."
+    }
+  },
+  "faq": [
+    {
+      "q": "Do you provide source code?",
+      "a": "Yes! You get clean, commented Python code."
+    },
+    {
+      "q": "Can you work with my existing systems?",
+      "a": "Absolutely. I integrate with APIs, databases, and third-party services."
+    },
+    {
+      "q": "What about support after delivery?",
+      "a": "Free consultation included. Premium package has 30-day support."
+    }
+  ]
+}

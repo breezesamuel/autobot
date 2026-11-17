@@ -1,0 +1,34 @@
+{
+  "title": "I will build a custom discord bot with advanced features",
+  "category": "Programming & Tech",
+  "subcategory": "Bot Programming",
+  "tags": [
+    "discord-bot",
+    "python",
+    "bot",
+    "automation",
+    "discord"
+  ],
+  "description": "Transform your Discord server with a custom bot built just for you. From simple commands to complex automation — I've got you covered.\n\n✅ FEATURES I CAN ADD:\n• Custom commands & response automation\n• Moderation tools (auto-mod, warn, kick, ban)\n• Music playback & queue management\n• Leveling & reward systems\n• Ticket system & support bot\n• Integration with Google Sheets, Notion, Trello\n• Database-backed features\n\n📦 DELIVERABLES:\n• Complete Python source code\n• Setup guide & documentation\n• 30-day bug fix support",
+  "packages": {
+    "basic": {
+      "price": 30,
+      "delivery_days": 2,
+      "revisions": 1,
+      "desc": "Basic bot: welcome messages, basic commands."
+    },
+    "standard": {
+      "price": 80,
+      "delivery_days": 4,
+      "revisions": 2,
+      "desc": "Advanced bot: moderation, music, leveling, custom commands."
+    },
+    "premium": {
+      "price": 200,
+      "delivery_days": 7,
+      "revisions": -1,
+      "desc": "Premium bot: database, API integrations, analytics dashboard, 24/7 hosting setup."
+    }
+  },
+  "faq": []
+}

@@ -1,0 +1,16 @@
+{
+  "test_task": {
+    "task": "test_task",
+    "ok": true,
+    "duration_ms": 0.0,
+    "output": "{'hello': 'world'}",
+    "error": ""
+  },
+  "sync_task": {
+    "task": "sync_task",
+    "ok": true,
+    "duration_ms": 0.0,
+    "output": "42",
+    "error": ""
+  }
+}

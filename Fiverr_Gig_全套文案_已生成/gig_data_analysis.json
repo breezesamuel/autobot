@@ -1,0 +1,34 @@
+{
+  "title": "I will analyze your data and create interactive reports",
+  "category": "Data",
+  "subcategory": "Data Processing",
+  "tags": [
+    "data-analysis",
+    "python",
+    "pandas",
+    "visualization",
+    "reporting"
+  ],
+  "description": "Turn your raw data into actionable insights. I clean, analyze, and visualize your data so you can make smarter decisions.\n\n✅ PROCESS:\n1. Understand your goals\n2. Clean and preprocess data\n3. Statistical analysis + visualization\n4. Deliver findings + recommendations\n\n🛠 TOOLS: Pandas, NumPy, Matplotlib, Seaborn, Plotly, SQL, Jupyter",
+  "packages": {
+    "basic": {
+      "price": 50,
+      "delivery_days": 2,
+      "revisions": 1,
+      "desc": "Clean + basic analysis + summary report."
+    },
+    "standard": {
+      "price": 120,
+      "delivery_days": 3,
+      "revisions": 2,
+      "desc": "Full EDA + visualizations + insights document."
+    },
+    "premium": {
+      "price": 250,
+      "delivery_days": 5,
+      "revisions": -1,
+      "desc": "Dashboard app + automated pipeline + presentation deck."
+    }
+  },
+  "faq": []
+}
